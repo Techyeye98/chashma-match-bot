@@ -1,5 +1,9 @@
 # Frame Matcher Bot 👓
 
+<img src="branding/bot-avatar.png" width="120" align="right" alt="Frame Matcher bot avatar">
+
+Try it on Telegram: [@ChashmaMatchBot](https://t.me/ChashmaMatchBot)
+
 A Telegram bot that finds the Lenskart frames closest to the ones you like, within your budget, and alerts you when something changes.
 
 ## What it does
@@ -123,4 +127,5 @@ python bot.py test "50-20-145 136mm black square" 800 offer
 - On Windows the bot only runs while the PC is on and the `start-bot.bat` window is open. Use the VPS setup above for 24/7.
 - On the first run the bot only records the current offer list. New-frame alerts start from the next scheduled check.
 - If the PC sleeps through a check time, that check runs when the PC wakes up. If the bot was closed at that time, it skips it and waits for the next check time.
+- This is an independent project. It is not affiliated with, endorsed by or sponsored by Lenskart.
 - It reads Lenskart's public website data. If Lenskart changes its site, the bot may need an update.
