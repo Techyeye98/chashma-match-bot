@@ -1,0 +1,9 @@
+# secrets
+.env
+
+# bot data (users, tracked frames, cache)
+data/
+
+# python
+__pycache__/
+*.pyc
