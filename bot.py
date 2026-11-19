@@ -127,11 +127,29 @@ def stat_inc(key, n=1):
             st.pop(old, None)
 
 
+SAVE_LOCK = threading.Lock()
+MAX_CACHE = 800                  # product specs kept in memory/disk (oldest dropped first)
+
+
 def save_state():
-    with LOCK:
+    # Serialize to a string under LOCK (fast), then write the file outside it so other
+    # threads are not blocked by disk I/O. A thread that changed a dict without LOCK can
+    # make json.dumps fail mid-way; a short retry covers that.
+    data = None
+    for _ in range(5):
+        try:
+            with LOCK:
+                data = json.dumps(STATE, ensure_ascii=False)
+            break
+        except RuntimeError:     # "dictionary changed size during iteration"
+            time.sleep(0.05)
+    if data is None:
+        print("save_state skipped: state kept changing", flush=True)
+        return
+    with SAVE_LOCK:
         tmp = STATE_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(STATE, f, ensure_ascii=False)
+            f.write(data)
         os.replace(tmp, STATE_FILE)
 
 
@@ -242,7 +260,11 @@ def product(pid):
         "ratings": r.get("totalNoOfRatings"),
     }
     with LOCK:
-        STATE["cache"][pid] = p
+        cache = STATE["cache"]
+        cache.pop(pid, None)     # re-insert so the newest stays at the end
+        cache[pid] = p
+        while len(cache) > MAX_CACHE:
+            cache.pop(next(iter(cache)))
     return p
 
 
@@ -711,9 +733,9 @@ def on_chat_member(upd):
         return
     JOINED_CACHE.pop(uid, None)
     with LOCK:
-        known = str(uid) in STATE["users"]
-    if not known:
-        return                   # never used the bot, nothing to lock
+        known = STATE["users"].get(str(uid))
+    if not known or known.get("banned") or known.get("blocked"):
+        return                   # never used the bot / banned / blocked us: nothing to send
     u = user(uid)
     missing = missing_channels(uid, fresh=True) or [ch]
     print(f"user {uid} left {ch['id']}, bot locked for them", flush=True)
@@ -751,8 +773,6 @@ def discount_view(u):
     if last:
         text += f"\n\n<i>Tumhara last frame: {e(name_of(last))}</i>"
         rows.append([{"text": f"🛍 {name_of(last)} discount pe chahiye", "url": discount_url(last)}])
-    else:
-        text += "\n\n💡 <i>Pehle frame search karoge to us frame ka link bhi message mein apne aap jayega.</i>"
     rows.append([{"text": "💬 Discount ke liye message karo", "url": discount_url()}])
     return text, {"inline_keyboard": rows}
 
@@ -881,18 +901,42 @@ def send(chat_id, text, markup=None):
                       disable_web_page_preview="true")
         if markup and i == len(chunks) - 1:
             params["reply_markup"] = json.dumps(markup)
-        try:
-            r = tg("sendMessage", **params)
-            ids.append(((r or {}).get("result") or {}).get("message_id"))
-        except urllib.error.HTTPError as ex:
-            if ex.code == 403:           # user blocked the bot
-                with LOCK:
-                    if str(chat_id) in STATE["users"]:
-                        STATE["users"][str(chat_id)]["blocked"] = True
-            print("send failed:", ex)
-        except Exception as ex:
-            print("send failed:", ex)
+        for attempt in range(2):
+            try:
+                r = tg("sendMessage", **params)
+                ids.append(((r or {}).get("result") or {}).get("message_id"))
+                break
+            except urllib.error.HTTPError as ex:
+                body = ex.read().decode(errors="ignore")
+                if ex.code == 429 and attempt == 0:      # Telegram rate limit: wait and retry once
+                    try:
+                        wait = (json.loads(body or "{}").get("parameters") or {}).get("retry_after", 5)
+                    except ValueError:
+                        wait = 5
+                    time.sleep(int(wait) + 1)
+                    continue
+                if ex.code == 403:           # user blocked the bot
+                    with LOCK:
+                        if str(chat_id) in STATE["users"]:
+                            STATE["users"][str(chat_id)]["blocked"] = True
+                print("send failed:", ex, body[:200])
+                break
+            except Exception as ex:
+                print("send failed:", ex)
+                break
     return ids
+
+
+def url_button(text, url):
+    """Inline URL button, or None when the link is missing (Telegram rejects empty URLs)."""
+    return {"text": text, "url": url} if url else None
+
+
+def markup_rows(rows):
+    """Drop None buttons and empty rows; None when nothing is left."""
+    rows = [[b for b in row if b] for row in rows]
+    rows = [row for row in rows if row]
+    return {"inline_keyboard": rows} if rows else None
 
 
 def edit(chat_id, msg_id, text, markup=None):
@@ -979,11 +1023,11 @@ def favs_message(u):
                      f"📐 {dims(f)} · 🎨 {e(f.get('colour'))} {e(f.get('shape'))}\n"
                      f"{link_html(f)}")
         rows.append([{"text": f"🔎 {i} jaise", "callback_data": f"sim:{f['id']}"},
-                     {"text": f"🛒 {i} kholo", "url": f["url"]},
+                     url_button(f"🛒 {i} kholo", f.get("url")),
                      {"text": f"❌ {i} hatao", "callback_data": f"unfav:{f['id']}"}])
     rows.append([{"text": "🔄 Stock aur price abhi check karo", "callback_data": "check"}])
     save_state()
-    return "\n\n".join(lines), {"inline_keyboard": rows}
+    return "\n\n".join(lines), markup_rows(rows)
 
 
 def new_message(u):
@@ -1051,7 +1095,8 @@ def do_match(chat_id, u, t, scope=None):
         pass
     wait = send(chat_id, "🔍 <b>Dhoond raha hoon...</b>\n"
                          f"<i>{scope_name(scope)} ke frames check ho rahe hain, 10-20 second lagenge</i>")
-    u["last"] = t
+    with LOCK:
+        u["last"] = t
     stat_inc("searches")
     save_state()
     try:
@@ -1063,7 +1108,7 @@ def do_match(chat_id, u, t, scope=None):
     if ranked:
         rows.append([{"text": f"⭐ {i}", "callback_data": f"fav:{c['id']}"}
                      for i, (_, c) in enumerate(ranked, 1)])
-        rows.append([{"text": f"🛒 {i}", "url": c["url"]} for i, (_, c) in enumerate(ranked, 1)])
+        rows.append([url_button(f"🛒 {i}", c.get("url")) for i, (_, c) in enumerate(ranked, 1)])
     if t.get("id"):
         rows.append([{"text": "⭐ Mera frame track karo", "callback_data": f"fav:{t['id']}"}])
         rows.append([{"text": "🛍 Ye frame discount pe chahiye", "url": discount_url(t)}])
@@ -1071,7 +1116,7 @@ def do_match(chat_id, u, t, scope=None):
             rows.append([{"text": "🌐 Poore Lenskart mein dhoondo", "callback_data": f"simall:{t['id']}"}])
     if ranked:
         text += f"\n\n{DIV}\n👇 <b>⭐ number</b> = track karo · <b>🛒 number</b> = Lenskart pe kholo"
-    send(chat_id, text, {"inline_keyboard": rows} if rows else None)
+    send(chat_id, text, markup_rows(rows))
 
 
 def handle(chat_id, text):
@@ -1144,6 +1189,13 @@ def handle(chat_id, text):
             return send(chat_id, "Pehle frame ka link bhejo, phir ⭐ button dabao.")
         return send(chat_id, add_fav(u, t))
     if cmd == "/check":
+        if not u["favs"]:
+            return send(chat_id, "⭐ Abhi koi frame track nahi ho raha, check karne ko kuch nahi hai.\n"
+                                 "Frame ka link bhejo, phir result ke neeche ⭐ dabao.")
+        left = CHECK_COOLDOWN - (time.time() - LAST_MANUAL_CHECK.get(chat_id, 0))
+        if left > 0 and not is_admin(chat_id):
+            return send(chat_id, f"⏳ Abhi check hua tha. {int(left) + 1} second baad dobara try karo.")
+        LAST_MANUAL_CHECK[chat_id] = time.time()
         wait = send(chat_id, "🔄 <b>Check kar raha hoon...</b>")
         n = run_watch(only_chat=str(chat_id))
         for mid in wait:
@@ -1326,10 +1378,6 @@ def admin_key(chat, act):
     text, markup = admin_open(chat, act)
     if text:
         send(chat, text, markup)
-
-
-def back_btn():
-    return [("🔄 Overview", "adm:refresh")]
 
 
 def stats_view():
@@ -1647,25 +1695,6 @@ def on_admin_callback(cq, chat, uid, val, msg_id):
     if act in ("refresh", "stats", "health", "banmenu", "schedlist", "bc", "lookup", "banask"):
         answer(cq)
         return edit(chat, msg_id, *admin_open(uid, act))
-    if act == "bc":
-        ADMIN_PENDING[uid] = {"stage": "await"}
-        answer(cq)
-        return edit(chat, msg_id,
-                    "📢 <b>Sabko message bhejo</b>\n\n"
-                    "Ab jo message bhejoge (text, photo, video, kuch bhi) wahi users ko "
-                    "bot ki taraf se jayega.\n\nUske baad target chuno, khud ko test bhejo, "
-                    "phir abhi bhejo ya schedule karo.",
-                    inline([[("❌ Cancel", "adm:cancel")]]))
-    if act == "lookup":
-        ADMIN_PENDING[uid] = {"stage": "lookup"}
-        answer(cq)
-        return edit(chat, msg_id, "👤 <b>User dhoondo</b>\n\nUser ka <b>ID</b> ya <b>@username</b> bhejo.",
-                    inline([[("❌ Cancel", "adm:cancel")]]))
-    if act == "banask":
-        ADMIN_PENDING[uid] = {"stage": "ban"}
-        answer(cq)
-        return edit(chat, msg_id, "🚫 <b>User ban karo</b>\n\nJise ban karna hai uska <b>ID</b> ya <b>@username</b> bhejo.",
-                    inline([[("❌ Cancel", "adm:cancel")]]))
     if act in ("ban", "unban"):
         if act == "ban" and is_admin(arg):
             return answer(cq, "Admin ko ban nahi kar sakte", alert=True)
@@ -1730,26 +1759,43 @@ def on_admin_callback(cq, chat, uid, val, msg_id):
 
 
 # ---------------------------------------------------------------- watcher
+WATCH_LOCK = threading.Lock()   # one stock/price check at a time (scheduled or manual)
+CHECK_COOLDOWN = 120            # seconds between manual checks for one user
+LAST_MANUAL_CHECK = {}
+
+
 def run_watch(only_chat=None):
-    """Stock / price / offer / new-arrival alerts. Returns number of alerts sent."""
+    """Stock / price / offer / new-arrival alerts. Returns number of alerts sent.
+    With only_chat (a user's manual check) only that user's tracked frames are checked;
+    new-arrival alerts are left to the scheduled run so nobody gets them twice."""
+    with WATCH_LOCK:
+        return _run_watch(only_chat)
+
+
+def _run_watch(only_chat=None):
     sent = 0
     offer = list_category(OFFER_CAT)
     offer_ids = {p["id"] for p in offer}
     offer_by_id = {p["id"]: p for p in offer}
     with LOCK:
         seen = STATE["seen_offer"]
-        new_ids = [] if seen is None else [i for i in offer_ids if i not in set(seen)]
+        new_ids = ([] if seen is None or only_chat is not None
+                   else [i for i in offer_ids if i not in set(seen)])
         users = {k: v for k, v in STATE["users"].items()
                  if (only_chat is None or k == only_chat)}
 
-    new_items = []
-    for pid in new_ids[:80]:
+    def fetch(pid):
         try:
             c = dict(product(pid))
             c["price"] = offer_by_id[pid]["price"] or c["price"]
-            new_items.append(c)
+            return c
         except Exception:
-            pass
+            return None
+
+    with ThreadPoolExecutor(8) as ex:
+        fetched = list(ex.map(fetch, new_ids))
+    new_items = [c for c in fetched if c]
+    failed_new = {pid for pid, c in zip(new_ids, fetched) if not c}   # retry these next time
 
     for chat_id, u in users.items():
         if (not u.get("alerts", True) or u.get("banned") or u.get("blocked")) and only_chat is None:
@@ -1762,17 +1808,18 @@ def run_watch(only_chat=None):
             if missing:          # left a channel: no alerts, one reminder per day
                 today = now_ist().date().isoformat()
                 if u.get("lock_notice") != today:
-                    u["lock_notice"] = today
+                    with LOCK:
+                        u["lock_notice"] = today
                     send(chat_id, *join_view(u.get("name"), missing))
                 continue
         msgs = []
-        for f in u.get("favs", []):
+        for f in list(u.get("favs", [])):
             try:
                 p = product(f["id"])
             except Exception:
                 continue
             name = f"<b>{e(name_of(f))}</b>"
-            buy = {"inline_keyboard": [[{"text": "🛒 Lenskart pe kholo", "url": f["url"]}]]}
+            buy = markup_rows([[url_button("🛒 Lenskart pe kholo", f.get("url") or p.get("url"))]])
             now_stock = p["qty"] > 0
             if now_stock and not f.get("in_stock", True):
                 msgs.append((f"🟢 <b>Stock mein wapas aa gaya!</b>\n\n{name}\n{price_html(p)}\n"
@@ -1786,7 +1833,8 @@ def run_watch(only_chat=None):
             if now_offer and not f.get("in_offer"):
                 msgs.append((f"🏷 <b>Tumhara frame ab offer mein hai!</b>\n\n{name}\n"
                              f"💰 <b>₹{offer_by_id[f['id']]['price']}</b>\n📦 {stock_label(p['qty'])}", buy))
-            f.update(in_stock=now_stock, price=p["price"] or f.get("price"), in_offer=now_offer)
+            with LOCK:
+                f.update(in_stock=now_stock, price=p["price"] or f.get("price"), in_offer=now_offer)
 
             for c in new_items:
                 if c["id"] == f["id"] or (c["price"] or 0) > u.get("budget", DEFAULT_BUDGET):
@@ -1798,15 +1846,16 @@ def run_watch(only_chat=None):
                         f"<b>{e(name_of(c))}</b>\n{label(s)}\n{price_html(c)}\n"
                         f"{specs_line(c)}\n{look_line(c)}\n📦 {stock_label(c.get('qty'))}\n"
                         f"↔️ <i>Farak: {e(diff_line(f, c))}</i>",
-                        {"inline_keyboard": [[{"text": "⭐ Track karo", "callback_data": f"fav:{c['id']}"},
-                                              {"text": "🛒 Kholo", "url": c["url"]}]]}))
+                        markup_rows([[{"text": "⭐ Track karo", "callback_data": f"fav:{c['id']}"},
+                                      url_button("🛒 Kholo", c.get("url"))]])))
         for m, markup in msgs:
             send(chat_id, m, markup)
             sent += 1
+            time.sleep(0.05)     # stay under Telegram's ~30 msgs/sec limit
 
     with LOCK:
         if only_chat is None or STATE["seen_offer"] is None:
-            STATE["seen_offer"] = sorted(offer_ids)
+            STATE["seen_offer"] = sorted(offer_ids - failed_new)
             now = time.time()
             for c in new_items:
                 STATE["recent_new"].append({k: c.get(k) for k in (
@@ -1934,14 +1983,15 @@ def main():
                      uname=frm.get("username"), msg=msg):
                 try:
                     u = user(chat)
-                    changed = u.pop("blocked", None) is not None   # they are talking to us again
-                    for key, val in (("name", first), ("username", uname)):
-                        if val and u.get(key) != val:
-                            u[key] = val
+                    with LOCK:
+                        changed = u.pop("blocked", None) is not None   # they are talking to us again
+                        for key, val in (("name", first), ("username", uname)):
+                            if val and u.get(key) != val:
+                                u[key] = val
+                                changed = True
+                        if time.time() - (u.get("last_seen") or 0) > 600:
                             changed = True
-                    if time.time() - (u.get("last_seen") or 0) > 600:
-                        changed = True
-                    u["last_seen"] = time.time()
+                        u["last_seen"] = time.time()
                     if changed:
                         save_state()
                     if u.get("banned") and not is_admin(uid):
