@@ -129,6 +129,7 @@ def stat_inc(key, n=1):
 
 SAVE_LOCK = threading.Lock()
 MAX_CACHE = 800                  # product specs kept in memory/disk (oldest dropped first)
+RECENT_NEW_MAX = 500             # new offer frames remembered for "Naye offer frames" (last 7 days)
 
 
 def save_state():
@@ -1862,7 +1863,7 @@ def _run_watch(only_chat=None):
                     "id", "url", "brand", "model", "lens", "bridge", "temple",
                     "width", "colour", "shape", "price")} | {"ts": now})
             STATE["recent_new"] = [n for n in STATE["recent_new"]
-                                   if n["ts"] >= now - 7 * 86400][-200:]
+                                   if n["ts"] >= now - 7 * 86400][-RECENT_NEW_MAX:]
     save_state()
     return sent
 
