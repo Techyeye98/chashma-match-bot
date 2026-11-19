@@ -603,6 +603,15 @@ def parse_channels(s):
 
 
 REQUIRED_CHANNELS = parse_channels(ENV.get("REQUIRED_CHANNELS"))
+
+
+def load_channels():
+    """Channels live in the bot data (editable from the admin panel). The .env list
+    is only the starting point the first time the bot runs."""
+    with LOCK:
+        if isinstance(STATE.get("channels"), list):
+            REQUIRED_CHANNELS[:] = STATE["channels"]
+        STATE["channels"] = REQUIRED_CHANNELS    # same list: admin edits get saved
 JOIN_OK_SECONDS = 3600           # re-check a member at most once an hour (leave events lock instantly)
 JOINED_CACHE = {}                # user_id -> time last confirmed as member
 CHANNEL_TITLES = {}
@@ -882,11 +891,12 @@ A_BC = "📢 Sabko message"
 A_SCHED = "⏰ Scheduled"
 A_LOOKUP = "👤 User dhoondo"
 A_BAN = "🚫 Ban / Unban"
+A_CHAN = "📢 Channels"
 A_EXIT = "⬅️ Normal menu"
 ADMIN_BTN = {A_STATS: "stats", A_HEALTH: "health", A_BC: "bc", A_SCHED: "schedlist",
-             A_LOOKUP: "lookup", A_BAN: "banmenu", A_EXIT: "exit"}
+             A_LOOKUP: "lookup", A_BAN: "banmenu", A_CHAN: "chanlist", A_EXIT: "exit"}
 ADMIN_KB = {
-    "keyboard": [[A_STATS, A_HEALTH], [A_BC, A_SCHED], [A_LOOKUP, A_BAN], [A_EXIT]],
+    "keyboard": [[A_STATS, A_HEALTH], [A_BC, A_SCHED], [A_LOOKUP, A_BAN], [A_CHAN, A_EXIT]],
     "resize_keyboard": True,
     "is_persistent": True,
     "input_field_placeholder": "Admin mode",
@@ -1396,11 +1406,19 @@ def admin_view():
 def admin_open(uid, act):
     """Admin screen for a keyboard button or inline button. Returns (text, markup)."""
     views = {"refresh": admin_view, "stats": stats_view, "health": health_view,
-             "banmenu": ban_list_view, "schedlist": schedlist_view}
+             "banmenu": ban_list_view, "schedlist": schedlist_view, "chanlist": channels_view}
     if act in views:
         ADMIN_PENDING.pop(uid, None)
         return views[act]()
     cancel = inline([[("❌ Cancel", "adm:cancel")]])
+    if act == "chanadd":
+        ADMIN_PENDING[uid] = {"stage": "chan_add"}
+        return ("➕ <b>Naya channel add karo</b>\n\n"
+                "<b>Pehle</b> bot ko us channel mein <b>admin</b> banao.\n\n"
+                "Phir yahan bhejo:\n"
+                "• Public channel: <code>@channelname</code> ya <code>https://t.me/channelname</code>\n"
+                "• Private channel: us channel ki <b>koi bhi post forward</b> karo\n\n"
+                "<i>Private channel ka invite link bot khud bana lega.</i>"), cancel
     if act == "bc":
         ADMIN_PENDING[uid] = {"stage": "await"}
         return ("📢 <b>Sabko message bhejo</b>\n\n"
@@ -1669,7 +1687,102 @@ def admin_capture(chat, uid, msg):
             return True
         send(chat, *user_view(uid_s, u))
         return True
+    if stage == "chan_add":
+        ok, msg_text = add_channel(msg)
+        if ok:
+            ADMIN_PENDING.pop(uid, None)
+            send(chat, msg_text)
+            send(chat, *channels_view())
+        else:
+            send(chat, msg_text, inline([[("❌ Cancel", "adm:cancel")]]))
+        return True
     return False
+
+
+# ---- required channels (managed from the admin panel)
+BOT_ID = None
+
+
+def bot_status(cid):
+    try:
+        return tg("getChatMember", chat_id=cid, user_id=BOT_ID)["result"].get("status")
+    except Exception:
+        return None
+
+
+def channels_view():
+    lines = ["📢 <b>Join zaroori channels</b>\n"]
+    rows = []
+    if not REQUIRED_CHANNELS:
+        lines.append("Abhi koi channel nahi hai, isliye bot <b>sab ke liye khula</b> hai.")
+    for i, ch in enumerate(REQUIRED_CHANNELS, 1):
+        st = bot_status(ch["id"])
+        badge = "✅ bot admin hai" if st in ("administrator", "creator") else "⚠️ bot admin NAHI hai, check skip ho raha hai"
+        lines.append(f"{num_emoji(i)} <b>{e(channel_title(ch))}</b>\n"
+                     f"   <code>{e(ch['id'])}</code> · {badge}")
+        rows.append([(f"❌ {channel_title(ch)} hatao", f"adm:chdel:{ch['id']}")])
+    lines.append("\nNaya channel add karne ke liye bot ko pehle us channel mein admin banao.")
+    rows.append([("➕ Naya channel add karo", "adm:chanadd")])
+    return "\n".join(lines), inline(rows)
+
+
+def add_channel(msg):
+    """Admin sent @name / t.me link / a forwarded channel post. Returns (ok, message)."""
+    origin = msg.get("forward_origin") or {}
+    fchat = origin.get("chat") if origin.get("type") == "channel" else msg.get("forward_from_chat")
+    text = (msg.get("text") or "").strip()
+    if fchat:
+        cid = str(fchat["id"])
+    else:
+        m = re.fullmatch(r"(?:https?://)?(?:t\.me|telegram\.me)/([A-Za-z0-9_]{4,})/?|@([A-Za-z0-9_]{4,})", text)
+        if not m:
+            if re.search(r"t\.me/(\+|joinchat/)", text):
+                return False, ("🔒 Private channel ke invite link se bot channel pehchaan nahi sakta.\n"
+                               "Us channel ki <b>koi bhi post forward</b> karo.")
+            return False, ("🤔 Samajh nahi aaya. <code>@channelname</code> bhejo, "
+                           "ya private channel ki koi post forward karo.")
+        cid = "@" + (m.group(1) or m.group(2))
+    try:
+        info = tg("getChat", chat_id=cid)["result"]
+    except Exception:
+        return False, ("❌ Channel nahi mila. Check karo naam sahi hai aur bot us channel mein "
+                       "<b>admin</b> hai.")
+    if info.get("type") not in ("channel", "supergroup"):
+        return False, "❌ Ye channel nahi hai. Sirf channel (ya group) add ho sakta hai."
+    num = str(info["id"])
+    if any(c.get("num") == num or c["id"] == cid for c in REQUIRED_CHANNELS):
+        return False, f"ℹ️ <b>{e(info.get('title'))}</b> pehle se list mein hai."
+    if bot_status(num) not in ("administrator", "creator"):
+        return False, (f"⚠️ Bot <b>{e(info.get('title'))}</b> mein admin nahi hai.\n"
+                       "Pehle bot ko admin banao, phir dobara bhejo.")
+    if info.get("username"):
+        ch_id, link = "@" + info["username"], f"https://t.me/{info['username']}"
+    else:
+        ch_id, link = num, info.get("invite_link")
+        if not link:
+            try:
+                link = tg("createChatInviteLink", chat_id=num, name="Chashma Match")["result"]["invite_link"]
+            except Exception:
+                return False, ("⚠️ Private channel ka invite link nahi ban paya.\n"
+                               "Bot ko channel mein <b>'Invite users via link'</b> permission do, phir dobara forward karo.")
+    with LOCK:
+        REQUIRED_CHANNELS.append({"id": ch_id, "link": link, "num": num})
+        CHANNEL_TITLES[ch_id] = info.get("title")
+        JOINED_CACHE.clear()     # everyone gets re-checked for the new channel
+    save_state()
+    print(f"channel added: {info.get('title')} ({ch_id})", flush=True)
+    return True, (f"✅ <b>{e(info.get('title'))}</b> add ho gaya!\n"
+                  "Ab naye aur purane sab users ko bot use karne ke liye ye bhi join karna hoga.")
+
+
+def remove_channel(cid):
+    with LOCK:
+        before = len(REQUIRED_CHANNELS)
+        REQUIRED_CHANNELS[:] = [c for c in REQUIRED_CHANNELS if c["id"] != cid]
+        removed = len(REQUIRED_CHANNELS) != before
+    if removed:
+        save_state()
+    return removed
 
 
 def broadcast(admin_chat, src_id, target="all"):
@@ -1738,9 +1851,24 @@ def on_admin_callback(cq, chat, uid, val, msg_id):
         return answer(cq, "Ye sirf admin ke liye hai")
     act, _, arg = val.partition(":")
     p = ADMIN_PENDING.get(uid) or {}
-    if act in ("refresh", "stats", "health", "banmenu", "schedlist", "bc", "lookup", "banask"):
+    if act in ("refresh", "stats", "health", "banmenu", "schedlist", "bc", "lookup", "banask",
+               "chanlist", "chanadd"):
         answer(cq)
         return edit(chat, msg_id, *admin_open(uid, act))
+    if act == "chdel":
+        ch = next((c for c in REQUIRED_CHANNELS if c["id"] == arg), None)
+        if not ch:
+            answer(cq, "Ye channel pehle hi hat chuka hai")
+            return edit(chat, msg_id, *channels_view())
+        answer(cq)
+        return edit(chat, msg_id, f"❓ <b>{e(channel_title(ch))}</b> ko list se hatana hai?\n\n"
+                                  "Iske baad users ko ye channel join karna zaroori nahi hoga.",
+                    inline([[("✅ Haan, hatao", f"adm:chdelok:{arg}"), ("❌ Nahi", "adm:chanlist")]]))
+    if act == "chdelok":
+        title = next((channel_title(c) for c in REQUIRED_CHANNELS if c["id"] == arg), arg)
+        removed = remove_channel(arg)
+        answer(cq, f"{title} hata diya" if removed else "Pehle hi hat chuka hai")
+        return edit(chat, msg_id, *channels_view())
     if act in ("ban", "unban"):
         if act == "ban" and is_admin(arg):
             return answer(cq, "Admin ko ban nahi kar sakte", alert=True)
@@ -1961,6 +2089,7 @@ def main():
     except Exception:
         pass
     load_state()
+    load_channels()
     if len(sys.argv) > 1 and sys.argv[1] == "test":
         t = target_from_text(sys.argv[2])
         budget = int(sys.argv[3]) if len(sys.argv) > 3 else DEFAULT_BUDGET
@@ -1972,7 +2101,9 @@ def main():
     if not TOKEN or ":" not in TOKEN:
         print("Bot token nahi mila. .env file mein BOT_TOKEN= ke aage BotFather ka token paste karo.")
         sys.exit(1)
+    global BOT_ID
     me = tg("getMe")["result"]
+    BOT_ID = me["id"]
     try:
         tg("setMyCommands", commands=json.dumps(
             [{"command": c, "description": d} for c, d in COMMANDS]))
