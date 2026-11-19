@@ -653,12 +653,19 @@ def missing_channels(user_id, fresh=False):
     return missing
 
 
-def join_view(name, missing, left_from=None):
-    """Join / re-join screen listing only the channels still to join. Returns (text, markup)."""
+def join_names(chs):
+    names = [f"<b>{e(channel_title(c))}</b>" for c in chs]
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " aur " + names[-1]
+
+
+def join_view(name, missing, locked=False):
+    """Join / re-join screen listing only the channels still to join. Returns (text, markup).
+    locked=True is the 'you left a channel' version."""
     hi = f"Hey {e(name)}! 👋\n" if name else ""
-    if left_from:
+    if locked:
+        verb = "chhod diya" if len(missing) == 1 else "chhod diye"
         top = (f"🔒 <b>Bot lock ho gaya</b>\n\n"
-               f"{hi}Tumne <b>{e(channel_title(left_from))}</b> chhod diya, isliye bot aur "
+               f"{hi}Tumne {join_names(missing)} {verb}, isliye bot aur "
                "alerts band ho gaye hain. Wapas join karo aur turant unlock karo.")
     else:
         top = (f"🔓 <b>Bot unlock karo, bilkul free</b>\n\n"
@@ -688,6 +695,7 @@ def gate(chat, uid, text, cq):
                 edit(chat, msg_id, *join_view(u.get("name"), missing))
                 return False
             answer(cq, "Unlock ho gaya! 🎉")
+            clear_lock_msg(u)        # next leave starts a fresh lock message
             edit(chat, msg_id, f"🔓 <b>Unlock ho gaya!</b>\n\nShukriya {e(u.get('name') or '')} 🙏 "
                                "Ab bot ke saare features tumhare hain.")
             send(chat, welcome_text(u), kb_for(chat))
@@ -697,6 +705,7 @@ def gate(chat, uid, text, cq):
             answer(cq, "Pehle channels join karo 🔒")
             send(chat, *join_view(u.get("name"), missing))
             return False
+        clear_lock_msg(u)
         return True
     first = (text or "").strip().split(" ")[0].lower().split("@")[0]
     if first in ("/help", "/myid", "/discount") or (text or "").strip() in (B_HELP, B_DISCOUNT):
@@ -705,6 +714,7 @@ def gate(chat, uid, text, cq):
     if missing:
         send(chat, *join_view(u.get("name"), missing))
         return False
+    clear_lock_msg(u)                # rejoined without the button: forget the old lock message
     return True
 
 
@@ -734,9 +744,48 @@ def on_chat_member(upd):
     if not known or known.get("banned") or known.get("blocked"):
         return                   # never used the bot / banned / blocked us: nothing to send
     u = user(uid)
-    missing = missing_channels(uid, fresh=True) or [ch]
     print(f"user {uid} left {ch['id']}, bot locked for them", flush=True)
-    send(uid, *join_view(u.get("name"), missing, left_from=ch))
+    # Leaving several channels fires several events at once. One lock message per user:
+    # the first leave sends it, later leaves rewrite that same message with the full list.
+    with user_lock(uid):
+        missing = missing_channels(uid, fresh=True) or [ch]
+        text, markup = join_view(u.get("name"), missing, locked=True)
+        mid = u.get("lock_msg")
+        if mid and edit_only(uid, mid, text, markup):
+            return
+        ids = send(uid, text, markup)
+        if ids and ids[0]:
+            with LOCK:
+                u["lock_msg"] = ids[0]
+            save_state()
+
+
+USER_LOCKS = {}
+
+
+def user_lock(uid):
+    with LOCK:
+        return USER_LOCKS.setdefault(uid, threading.Lock())
+
+
+def edit_only(chat_id, msg_id, text, markup=None):
+    """Edit in place. True if the message now shows this text, False if it could not be edited."""
+    params = dict(chat_id=chat_id, message_id=msg_id, text=text, parse_mode="HTML",
+                  disable_web_page_preview="true")
+    if markup:
+        params["reply_markup"] = json.dumps(markup)
+    try:
+        tg("editMessageText", **params)
+        return True
+    except Exception as ex:
+        return "not modified" in str(getattr(ex, "read", lambda: b"")() or ex)
+
+
+def clear_lock_msg(u):
+    if u.get("lock_msg"):
+        with LOCK:
+            u.pop("lock_msg", None)
+        save_state()
 
 
 # ---------------------------------------------------------------- texts
