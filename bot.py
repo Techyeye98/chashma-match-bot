@@ -730,7 +730,8 @@ def support_text():
 
 def support_markup():
     return {"inline_keyboard": [[{"text": "💬 Offers aur help ke liye message karo",
-                                  "url": SUPPORT_URL}]]}
+                                  "url": SUPPORT_URL}],
+                                [{"text": "📖 Bot kaise use karein (guide)", "callback_data": "guide"}]]}
 
 
 def discount_url(frame=None):
@@ -750,6 +751,8 @@ def discount_view(u):
     if last:
         text += f"\n\n<i>Tumhara last frame: {e(name_of(last))}</i>"
         rows.append([{"text": f"🛍 {name_of(last)} discount pe chahiye", "url": discount_url(last)}])
+    else:
+        text += "\n\n💡 <i>Pehle frame search karoge to us frame ka link bhi message mein apne aap jayega.</i>"
     rows.append([{"text": "💬 Discount ke liye message karo", "url": discount_url()}])
     return text, {"inline_keyboard": rows}
 
@@ -777,12 +780,10 @@ def guide_text():
         "<b>Buttons</b>\n"
         f"{B_FIND} · link bhejne ka tareeka\n"
         f"{B_FAVS} · track ho rahe frames, live stock ke saath\n"
-        f"{B_BUDGET} · max price\n"
-        f"{B_SCOPE} · offer section ya poora Lenskart\n"
         f"{B_NEW} · pichhle 7 din ke naye offer frames\n"
-        f"{B_CHECK} · stock aur price abhi check karo\n"
-        f"{B_SETTINGS} · settings aur alerts on/off\n"
-        f"{B_DISCOUNT} · frame extra discount pe lene ke liye humse baat karo\n\n"
+        f"{B_DISCOUNT} · frame extra discount pe lene ke liye humse baat karo\n"
+        f"{B_SETTINGS} · budget, kahan dhoondu, alerts, abhi check, sab yahin se\n"
+        f"{B_HELP} · offers aur help ke liye contact\n\n"
         "<b>Stock</b>\n"
         "✅ 50+ · araam se lo\n"
         "⚠️ 11-50 · kam bacha hai\n"
@@ -809,14 +810,31 @@ B_GUIDE = "📖 Guide"
 B_HELP = "❓ Help"
 B_DISCOUNT = "🛍 Discount pe kharido"
 B_ADMIN = "🛠 Admin panel"
+A_STATS = "📊 Stats"
+A_HEALTH = "🩺 Health"
+A_BC = "📢 Sabko message"
+A_SCHED = "⏰ Scheduled"
+A_LOOKUP = "👤 User dhoondo"
+A_BAN = "🚫 Ban / Unban"
+A_EXIT = "⬅️ Normal menu"
+ADMIN_BTN = {A_STATS: "stats", A_HEALTH: "health", A_BC: "bc", A_SCHED: "schedlist",
+             A_LOOKUP: "lookup", A_BAN: "banmenu", A_EXIT: "exit"}
+ADMIN_KB = {
+    "keyboard": [[A_STATS, A_HEALTH], [A_BC, A_SCHED], [A_LOOKUP, A_BAN], [A_EXIT]],
+    "resize_keyboard": True,
+    "is_persistent": True,
+    "input_field_placeholder": "Admin mode",
+}
 
 BUTTON_CMD = {B_FIND: "/find", B_FAVS: "/favs", B_BUDGET: "/budget", B_SCOPE: "/scope",
               B_NEW: "/new", B_CHECK: "/check", B_ALERTS: "/alerts",
               B_SETTINGS: "/settings", B_GUIDE: "/guide", B_HELP: "/help", B_DISCOUNT: "/discount", B_ADMIN: "/admin"}
 
 MAIN_KB = {
-    "keyboard": [[B_FIND, B_FAVS], [B_BUDGET, B_SCOPE], [B_NEW, B_CHECK],
-                 [B_SETTINGS, B_GUIDE], [B_DISCOUNT, B_HELP]],
+    "keyboard": [[B_FIND],
+                 [B_FAVS, B_NEW],
+                 [B_DISCOUNT],
+                 [B_SETTINGS, B_HELP]],
     "resize_keyboard": True,
     "is_persistent": True,
     "input_field_placeholder": "Lenskart frame ka link paste karo...",
@@ -963,6 +981,7 @@ def favs_message(u):
         rows.append([{"text": f"🔎 {i} jaise", "callback_data": f"sim:{f['id']}"},
                      {"text": f"🛒 {i} kholo", "url": f["url"]},
                      {"text": f"❌ {i} hatao", "callback_data": f"unfav:{f['id']}"}])
+    rows.append([{"text": "🔄 Stock aur price abhi check karo", "callback_data": "check"}])
     save_state()
     return "\n\n".join(lines), {"inline_keyboard": rows}
 
@@ -998,7 +1017,8 @@ def settings_view(u):
             f"⏰ Auto check: roz {times_text()} (IST)")
     return text, inline([[("💰 Budget badlo", "menu:budget"), ("🌐 Jagah badlo", "menu:scope")],
                          [("🔕 Alerts OFF karo" if u["alerts"] else "🔔 Alerts ON karo",
-                           "alerts:" + ("off" if u["alerts"] else "on"))]])
+                           "alerts:" + ("off" if u["alerts"] else "on"))],
+                         [("🔄 Abhi check karo", "check"), ("📖 Guide", "guide")]])
 
 
 def budget_view(u):
@@ -1057,6 +1077,8 @@ def do_match(chat_id, u, t, scope=None):
 def handle(chat_id, text):
     u = user(chat_id)
     text = text.strip()
+    if text in ADMIN_BTN and is_admin(chat_id):
+        return admin_key(chat_id, ADMIN_BTN[text])
     if text in BUTTON_CMD:
         text = BUTTON_CMD[text]
     cmd, _, arg = text.partition(" ")
@@ -1070,7 +1092,8 @@ def handle(chat_id, text):
         return send(chat_id, f"🆔 Tumhara Telegram ID: <code>{chat_id}</code>")
     if cmd == "/admin":
         if is_admin(chat_id):
-            return send(chat_id, *admin_view())
+            return send(chat_id, admin_view()[0] + "\n\n👇 <i>Neeche ke buttons se admin features kholo</i>",
+                        ADMIN_KB)
         return send(chat_id, "🤔 Ye command samajh nahi aaya. Neeche ke buttons use karo.", kb_for(chat_id))
     if cmd == "/help":
         return send(chat_id, support_text(), support_markup())
@@ -1168,6 +1191,12 @@ def on_callback(cq):
     if kind == "sim":
         answer(cq)
         return do_match(chat_id, u, product(val))
+    if kind == "guide":
+        answer(cq)
+        return send(chat_id, guide_text())
+    if kind == "check":
+        answer(cq, "Check ho raha hai")
+        return handle(chat_id, "/check")
     if kind == "simall":
         answer(cq)
         return do_match(chat_id, u, product(val), scope="all")
@@ -1263,14 +1292,44 @@ def admin_view():
             f"⭐ Tracked frames: <b>{sum(len(u.get('favs') or []) for u in users)}</b>\n"
             f"🚫 Banned: {banned} · bot block kiya: {blocked}\n"
             f"⏰ Scheduled broadcasts: {sched}")
-    return text, inline([[("📊 Stats", "adm:stats"), ("🩺 Health", "adm:health")],
-                         [("📢 Sabko message", "adm:bc"), (f"⏰ Scheduled ({sched})", "adm:schedlist")],
-                         [("👤 User dhoondo", "adm:lookup"), ("🚫 Ban / Unban", "adm:banmenu")],
-                         [("🔄 Refresh", "adm:refresh")]])
+    return text, inline([[("🔄 Refresh", "adm:refresh")]])
+
+
+def admin_open(uid, act):
+    """Admin screen for a keyboard button or inline button. Returns (text, markup)."""
+    views = {"refresh": admin_view, "stats": stats_view, "health": health_view,
+             "banmenu": ban_list_view, "schedlist": schedlist_view}
+    if act in views:
+        ADMIN_PENDING.pop(uid, None)
+        return views[act]()
+    cancel = inline([[("❌ Cancel", "adm:cancel")]])
+    if act == "bc":
+        ADMIN_PENDING[uid] = {"stage": "await"}
+        return ("📢 <b>Sabko message bhejo</b>\n\n"
+                "Ab jo message bhejoge (text, photo, video, kuch bhi) wahi users ko "
+                "bot ki taraf se jayega.\n\nUske baad target chuno, khud ko test bhejo, "
+                "phir abhi bhejo ya schedule karo."), cancel
+    if act == "lookup":
+        ADMIN_PENDING[uid] = {"stage": "lookup"}
+        return "👤 <b>User dhoondo</b>\n\nUser ka <b>ID</b> ya <b>@username</b> bhejo.", cancel
+    if act == "banask":
+        ADMIN_PENDING[uid] = {"stage": "ban"}
+        return "🚫 <b>User ban karo</b>\n\nJise ban karna hai uska <b>ID</b> ya <b>@username</b> bhejo.", cancel
+    return None, None
+
+
+def admin_key(chat, act):
+    """An admin pressed a button on the admin keyboard."""
+    if act == "exit":
+        ADMIN_PENDING.pop(chat, None)
+        return send(chat, "👌 Normal menu wapas aa gaya. Admin panel ke liye 🛠 dabao.", kb_for(chat))
+    text, markup = admin_open(chat, act)
+    if text:
+        send(chat, text, markup)
 
 
 def back_btn():
-    return [("⬅️ Admin panel", "adm:refresh")]
+    return [("🔄 Overview", "adm:refresh")]
 
 
 def stats_view():
@@ -1308,7 +1367,7 @@ def stats_view():
     for d in reversed(days7):
         s = stats.get(d) or {}
         lines.append(f"<code>{d[5:]}</code>  {s.get('new_users', 0):>3} / {s.get('searches', 0):>3}")
-    return "\n".join(lines), inline([[("🔄 Refresh", "adm:stats")], back_btn()])
+    return "\n".join(lines), inline([[("🔄 Refresh", "adm:stats")]])
 
 
 def health_view():
@@ -1328,7 +1387,7 @@ def health_view():
         lines.append(f"❗ Last error ({ago(last_err[0])}): <code>{e(last_err[1][:150])}</code>")
     with LOCK:
         lines.append(f"💾 Data: {len(STATE['users'])} users, {len(STATE.get('cache') or {})} frames cache mein")
-    return "\n".join(lines), inline([[("🔄 Refresh", "adm:health")], back_btn()])
+    return "\n".join(lines), inline([[("🔄 Refresh", "adm:health")]])
 
 
 def find_user(q):
@@ -1363,7 +1422,7 @@ def user_view(uid_s, u):
     if (u.get("last") or {}).get("url"):
         lines.append(f"\n🔎 Last search: {e(name_of(u['last']))}")
     ban = ("✅ Unban karo", f"adm:unban:{uid_s}") if u.get("banned") else ("🚫 Ban karo", f"adm:ban:{uid_s}")
-    return "\n".join(lines), inline([[ban], [("👤 Aur user dhoondo", "adm:lookup")], back_btn()])
+    return "\n".join(lines), inline([[ban], [("👤 Aur user dhoondo", "adm:lookup")]])
 
 
 def ban_list_view():
@@ -1379,7 +1438,6 @@ def ban_list_view():
             rows.append([(f"✅ Unban {u.get('name') or k}", f"adm:unban:{k}")])
     else:
         lines.append("\nAbhi koi banned nahi hai.")
-    rows.append(back_btn())
     return "\n".join(lines), inline(rows)
 
 
@@ -1463,20 +1521,19 @@ def add_schedule(admin_chat, p, ts):
         STATE.setdefault("scheduled", []).append(item)
     save_state()
     return (f"⏰ <b>Schedule ho gaya!</b>\n\n🕒 {fmt_ts(ts)} IST\n🎯 {TARGETS[item['target']]}\n\n"
-            "Admin panel ke ⏰ Scheduled mein dekh ya cancel kar sakte ho.")
+            "⏰ Scheduled button mein dekh ya cancel kar sakte ho.")
 
 
 def schedlist_view():
     with LOCK:
         items = sorted(STATE.get("scheduled") or [], key=lambda x: x["ts"])
     if not items:
-        return "⏰ <b>Scheduled broadcasts</b>\n\nAbhi kuch schedule nahi hai.", inline([back_btn()])
+        return "⏰ <b>Scheduled broadcasts</b>\n\nAbhi kuch schedule nahi hai.", None
     lines = ["⏰ <b>Scheduled broadcasts</b>\n"]
     rows = []
     for i, it in enumerate(items, 1):
         lines.append(f"{num_emoji(i)} {fmt_ts(it['ts'])} · {TARGETS.get(it['target'], it['target'])}")
         rows.append([(f"❌ {i} cancel karo", f"adm:unsched:{it['id']}")])
-    rows.append(back_btn())
     return "\n".join(lines), inline(rows)
 
 
@@ -1486,7 +1543,7 @@ def admin_capture(chat, uid, msg):
     if not p or not is_admin(uid) or not msg.get("message_id"):
         return False
     text = (msg.get("text") or "").strip()
-    if text in BUTTON_CMD or text.startswith("/"):
+    if text in BUTTON_CMD or text in ADMIN_BTN or text.startswith("/"):
         ADMIN_PENDING.pop(uid, None)       # admin moved on: cancel the pending action
         return False
     stage = p.get("stage")
@@ -1500,7 +1557,7 @@ def admin_capture(chat, uid, msg):
             send(chat, "❌ Time samajh nahi aaya. Aise likho: <code>21:30</code> ya <code>25-11 9:30 pm</code>")
             return True
         ADMIN_PENDING.pop(uid, None)
-        send(chat, add_schedule(chat, p, ts), inline([back_btn()]))
+        send(chat, add_schedule(chat, p, ts))
         return True
     if stage in ("lookup", "ban"):
         uid_s, u = find_user(text)
@@ -1514,7 +1571,7 @@ def admin_capture(chat, uid, msg):
                 send(chat, "⚠️ Admin ko ban nahi kar sakte.")
                 return True
             set_ban(uid_s, True)
-            send(chat, f"🚫 <b>{e(u.get('name') or uid_s)}</b> ban ho gaya.", inline([back_btn()]))
+            send(chat, f"🚫 <b>{e(u.get('name') or uid_s)}</b> ban ho gaya.")
             return True
         send(chat, *user_view(uid_s, u))
         return True
@@ -1587,12 +1644,9 @@ def on_admin_callback(cq, chat, uid, val, msg_id):
         return answer(cq, "Ye sirf admin ke liye hai")
     act, _, arg = val.partition(":")
     p = ADMIN_PENDING.get(uid) or {}
-    views = {"refresh": admin_view, "stats": stats_view, "health": health_view,
-             "banmenu": ban_list_view, "schedlist": schedlist_view}
-    if act in views:
-        ADMIN_PENDING.pop(uid, None)
+    if act in ("refresh", "stats", "health", "banmenu", "schedlist", "bc", "lookup", "banask"):
         answer(cq)
-        return edit(chat, msg_id, *views[act]())
+        return edit(chat, msg_id, *admin_open(uid, act))
     if act == "bc":
         ADMIN_PENDING[uid] = {"stage": "await"}
         answer(cq)
@@ -1631,7 +1685,7 @@ def on_admin_callback(cq, chat, uid, val, msg_id):
     if act == "cancel":
         ADMIN_PENDING.pop(uid, None)
         answer(cq, "Cancel")
-        return edit(chat, msg_id, "❌ Cancel kar diya.", inline([back_btn()]))
+        return edit(chat, msg_id, "❌ Cancel kar diya.")
     # ---- steps that need a captured broadcast message
     if p.get("stage") not in ("confirm", "sched_time") or not p.get("src"):
         return answer(cq, "Ye broadcast pehle hi ho chuka ya cancel hua", alert=True)
@@ -1663,7 +1717,7 @@ def on_admin_callback(cq, chat, uid, val, msg_id):
                         inline([[("⬅️ Wapas", "adm:back")]]))
         ADMIN_PENDING.pop(uid, None)
         answer(cq, "Schedule ho gaya")
-        return edit(chat, msg_id, add_schedule(chat, p, int(arg)), inline([back_btn()]))
+        return edit(chat, msg_id, add_schedule(chat, p, int(arg)))
     if act == "send":
         ADMIN_PENDING.pop(uid, None)
         if BROADCAST_LOCK.locked():
