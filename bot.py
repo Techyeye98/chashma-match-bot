@@ -654,26 +654,22 @@ def missing_channels(user_id, fresh=False):
 
 
 def join_view(name, missing, left_from=None):
-    """Join / re-join screen with progress. Returns (text, markup)."""
-    total = len(REQUIRED_CHANNELS)
-    done = total - len(missing)
-    miss_ids = {ch["id"] for ch in missing}
-    bar = "🟩" * done + "⬜" * len(missing)
-    hi = f"Hey {e(name)}! " if name else ""
+    """Join / re-join screen listing only the channels still to join. Returns (text, markup)."""
+    hi = f"Hey {e(name)}! 👋\n" if name else ""
     if left_from:
         top = (f"🔒 <b>Bot lock ho gaya</b>\n\n"
-               f"{hi}Tumne <b>{e(channel_title(left_from))}</b> chhod diya. "
-               "Bot aur saare alerts tab tak band rahenge jab tak tum wapas join nahi karte.")
+               f"{hi}Tumne <b>{e(channel_title(left_from))}</b> chhod diya, isliye bot aur "
+               "alerts band ho gaye hain. Wapas join karo aur turant unlock karo.")
     else:
-        top = (f"🔒 <b>Bot unlock karo</b>\n\n"
-               f"{hi}Chashma Match bilkul free hai. Bas hamare channels join karo, "
-               "wahan roz Lenskart aur tech ke best deals aate hain. 🎁")
-    status = "\n".join(
-        f"{'⬜' if ch['id'] in miss_ids else '✅'} {e(channel_title(ch))}" for ch in REQUIRED_CHANNELS)
-    text = (f"{top}\n\n<b>Progress</b>  {bar}  {done}/{total}\n{status}\n\n"
-            "👇 Neeche se join karo, phir <b>Maine join kar liya</b> dabao.")
-    rows = [[{"text": f"➕ Join: {channel_title(ch)}", "url": ch["link"]}] for ch in missing]
-    rows.append([{"text": "✅ Maine join kar liya, unlock karo", "callback_data": "joined"}])
+        top = (f"🔓 <b>Bot unlock karo, bilkul free</b>\n\n"
+               f"{hi}Bas hamare channels join karo. Wahan roz Lenskart aur tech ke "
+               "<b>best deals</b> aate hain. 🎁")
+    todo = "\n".join(f"• {e(channel_title(ch))}" for ch in missing)
+    label = "Ye channel join karo" if len(missing) == 1 else f"Ye {len(missing)} channels join karo"
+    text = (f"{top}\n\n📢 <b>{label}:</b>\n{todo}\n\n"
+            "Join karne ke baad <b>✅ Maine join kar liya</b> dabao.")
+    rows = [[{"text": f"➕ {channel_title(ch)}", "url": ch["link"]}] for ch in missing]
+    rows.append([{"text": "✅ Maine join kar liya", "callback_data": "joined"}])
     return text, {"inline_keyboard": rows}
 
 
