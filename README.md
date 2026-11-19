@@ -95,7 +95,7 @@ scp -i <your-key>.pem FrameMatcher_Bot/bot.py <user>@<vps-ip>:~/FrameMatcher_Bot
 | `BOT_TOKEN` | Token from BotFather | required |
 | `CHECK_TIMES` | Daily auto-check times, 24-hour **India time (IST)**, comma separated. The server's own timezone doesn't matter. | `00:00,13:00` |
 | `REQUIRED_CHANNELS` | Channels users must join before using the bot. Public: `@username`; private: `-100id\|https://t.me/+invite`. Comma separated. The bot must be an admin in each channel. Empty = open to everyone. | empty |
-| `ADMIN_IDS` | Telegram user IDs (comma separated) that get the 🛠 Admin panel: user stats and a broadcast button that sends any message (text, photo, video) to all bot users. Send `/myid` to the bot to find your ID. | empty |
+| `ADMIN_IDS` | Telegram user IDs (comma separated) that get the 🛠 Admin panel: stats, bot health, user lookup, ban/unban, and broadcasts (any message type, test-send to yourself, target all / trackers / new users, send now or schedule). Send `/myid` to the bot to find your ID. | empty |
 | `DEFAULT_BUDGET` | Starting max price for new users (₹) | `1200` |
 
 ## Keypad buttons

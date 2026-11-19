@@ -105,6 +105,26 @@ def load_state():
     STATE.setdefault("seen_offer", None)
     STATE.setdefault("cache", {})
     STATE.setdefault("recent_new", [])
+    STATE.setdefault("stats", {})
+    STATE.setdefault("scheduled", [])
+    STATE.setdefault("health", {})
+
+
+HEALTH = {"started": time.time(), "errors": 0, "last_error": None, "poll_errors": 0}
+
+
+def today_key():
+    return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30))).date().isoformat()
+
+
+def stat_inc(key, n=1):
+    """Daily counters (IST dates), last 60 days kept."""
+    with LOCK:
+        st = STATE.setdefault("stats", {})
+        day = st.setdefault(today_key(), {})
+        day[key] = day.get(key, 0) + n
+        for old in sorted(st)[:-60]:
+            st.pop(old, None)
 
 
 def save_state():
@@ -117,7 +137,10 @@ def save_state():
 
 def user(chat_id):
     with LOCK:
-        u = STATE["users"].setdefault(str(chat_id), {})
+        if str(chat_id) not in STATE["users"]:
+            STATE["users"][str(chat_id)] = {"joined_ts": time.time()}
+            stat_inc("new_users")
+        u = STATE["users"][str(chat_id)]
         u.setdefault("budget", DEFAULT_BUDGET)
         u.setdefault("scope", "offer")
         u.setdefault("alerts", True)
@@ -910,6 +933,7 @@ def add_fav(u, t):
     f["in_stock"] = t.get("qty", 0) > 0
     f["in_offer"] = False
     u["favs"].append(f)
+    stat_inc("tracks")
     save_state()
     stock = stock_label(t.get("qty"))
     if not f["in_stock"]:
@@ -1008,6 +1032,7 @@ def do_match(chat_id, u, t, scope=None):
     wait = send(chat_id, "🔍 <b>Dhoond raha hoon...</b>\n"
                          f"<i>{scope_name(scope)} ke frames check ho rahe hain, 10-20 second lagenge</i>")
     u["last"] = t
+    stat_inc("searches")
     save_state()
     try:
         text, ranked = match_text(t, u["budget"], scope)
@@ -1050,6 +1075,7 @@ def handle(chat_id, text):
     if cmd == "/help":
         return send(chat_id, support_text(), support_markup())
     if cmd == "/discount":
+        stat_inc("discount")
         return send(chat_id, *discount_view(u))
     if cmd == "/guide":
         return send(chat_id, guide_text(), kb_for(chat_id))
@@ -1171,8 +1197,9 @@ def on_callback(cq):
 
 # ---------------------------------------------------------------- admin panel
 ADMIN_IDS = {int(x) for x in re.findall(r"-?\d+", ENV.get("ADMIN_IDS") or "")}
-ADMIN_PENDING = {}               # admin user id -> {"stage": "await"|"confirm", "src": msg id}
+ADMIN_PENDING = {}               # admin user id -> {"stage": ..., "src": msg id, "target": ...}
 BROADCAST_LOCK = threading.Lock()
+TARGETS = {"all": "👥 Sab users", "trackers": "⭐ Frame track karne wale", "new7": "🆕 Pichhle 7 din ke naye"}
 
 
 def is_admin(uid):
@@ -1190,44 +1217,312 @@ def kb_for(chat_id):
     return kb
 
 
+def fmt_ts(ts, fmt="%d %b, %I:%M %p"):
+    return datetime.datetime.fromtimestamp(ts, IST).strftime(fmt) if ts else "-"
+
+
+def ago(ts):
+    if not ts:
+        return "kabhi nahi"
+    s = int(time.time() - ts)
+    if s < 60:
+        return "abhi"
+    if s < 3600:
+        return f"{s // 60} min pehle"
+    if s < 86400:
+        return f"{s // 3600} ghante pehle"
+    return f"{s // 86400} din pehle"
+
+
+def target_ids(target):
+    week = time.time() - 7 * 86400
+    with LOCK:
+        items = list(STATE["users"].items())
+    out = []
+    for k, u in items:
+        if u.get("blocked") or u.get("banned"):
+            continue
+        if target == "trackers" and not u.get("favs"):
+            continue
+        if target == "new7" and (u.get("joined_ts") or 0) < week:
+            continue
+        out.append(k)
+    return out
+
+
 def admin_view():
     with LOCK:
         users = list(STATE["users"].values())
-        last = STATE.get("last_broadcast")
+        sched = len(STATE.get("scheduled") or [])
+    today = (STATE.get("stats") or {}).get(today_key(), {})
     blocked = sum(1 for u in users if u.get("blocked"))
-    lines = ["🛠 <b>Admin panel</b>\n",
-             f"👥 Users: <b>{len(users)}</b> (active {len(users) - blocked}, bot block kiya {blocked})",
-             f"⭐ Tracked frames: <b>{sum(len(u.get('favs') or []) for u in users)}</b>",
-             f"🔔 Alerts ON: <b>{sum(1 for u in users if u.get('alerts', True))}</b>"]
-    if REQUIRED_CHANNELS:
-        lines.append("📢 Join zaroori: " + ", ".join(e(channel_title(c)) for c in REQUIRED_CHANNELS))
-    if last:
-        when = datetime.datetime.fromtimestamp(last["ts"], IST).strftime("%d %b, %I:%M %p")
-        lines.append(f"📨 Last broadcast: {when} · {last['sent']}/{last['total']} pahuncha")
-    return "\n".join(lines), inline([[("📢 Sabko message bhejo", "adm:bc")],
-                                     [("🔄 Refresh", "adm:refresh")]])
+    banned = sum(1 for u in users if u.get("banned"))
+    text = ("🛠 <b>Admin panel</b>\n\n"
+            f"👥 Users: <b>{len(users)}</b> · aaj naye: <b>{today.get('new_users', 0)}</b>\n"
+            f"🔎 Aaj searches: <b>{today.get('searches', 0)}</b>\n"
+            f"⭐ Tracked frames: <b>{sum(len(u.get('favs') or []) for u in users)}</b>\n"
+            f"🚫 Banned: {banned} · bot block kiya: {blocked}\n"
+            f"⏰ Scheduled broadcasts: {sched}")
+    return text, inline([[("📊 Stats", "adm:stats"), ("🩺 Health", "adm:health")],
+                         [("📢 Sabko message", "adm:bc"), (f"⏰ Scheduled ({sched})", "adm:schedlist")],
+                         [("👤 User dhoondo", "adm:lookup"), ("🚫 Ban / Unban", "adm:banmenu")],
+                         [("🔄 Refresh", "adm:refresh")]])
+
+
+def back_btn():
+    return [("⬅️ Admin panel", "adm:refresh")]
+
+
+def stats_view():
+    now = time.time()
+    with LOCK:
+        users = list(STATE["users"].values())
+        stats = dict(STATE.get("stats") or {})
+    days7 = [(datetime.datetime.now(IST) - datetime.timedelta(days=d)).date().isoformat() for d in range(7)]
+
+    def total(key, days):
+        return sum((stats.get(d) or {}).get(key, 0) for d in days)
+
+    active1 = sum(1 for u in users if now - (u.get("last_seen") or 0) < 86400)
+    active7 = sum(1 for u in users if now - (u.get("last_seen") or 0) < 7 * 86400)
+    counts = {}
+    for u in users:
+        for f in u.get("favs") or []:
+            c = counts.setdefault(f["id"], [0, name_of(f)])
+            c[0] += 1
+    top = sorted(counts.values(), key=lambda x: -x[0])[:5]
+    lines = ["📊 <b>Stats</b>\n",
+             "<b>Users</b>",
+             f"👥 Total: <b>{len(users)}</b>",
+             f"🆕 Naye: aaj <b>{total('new_users', days7[:1])}</b> · 7 din <b>{total('new_users', days7)}</b>",
+             f"🟢 Active: aaj <b>{active1}</b> · 7 din <b>{active7}</b>",
+             f"🔔 Alerts ON: {sum(1 for u in users if u.get('alerts', True))}\n",
+             "<b>Usage</b>",
+             f"🔎 Searches: aaj <b>{total('searches', days7[:1])}</b> · 7 din <b>{total('searches', days7)}</b>",
+             f"⭐ Track kiye: aaj <b>{total('tracks', days7[:1])}</b> · 7 din <b>{total('tracks', days7)}</b>",
+             f"🛍 Discount menu khola: aaj <b>{total('discount', days7[:1])}</b> · 7 din <b>{total('discount', days7)}</b>"]
+    if top:
+        lines.append("\n<b>Sabse zyada track hue frames</b>")
+        lines += [f"{num_emoji(i)} {e(n)} · {c} log" for i, (c, n) in enumerate(top, 1)]
+    lines.append("\n<b>Pichhle 7 din</b> (naye users / searches)")
+    for d in reversed(days7):
+        s = stats.get(d) or {}
+        lines.append(f"<code>{d[5:]}</code>  {s.get('new_users', 0):>3} / {s.get('searches', 0):>3}")
+    return "\n".join(lines), inline([[("🔄 Refresh", "adm:stats")], back_btn()])
+
+
+def health_view():
+    up = int(time.time() - HEALTH["started"])
+    h = STATE.get("health") or {}
+    last_err = HEALTH.get("last_error")
+    lines = ["🩺 <b>Bot health</b>\n",
+             f"✅ Chal raha hai: {up // 86400} din {(up % 86400) // 3600} ghante "
+             f"{(up % 3600) // 60} min se",
+             f"🕒 Last auto check: {fmt_ts(h.get('last_check'))} ({ago(h.get('last_check'))})",
+             f"🔔 Us check mein alerts gaye: {h.get('last_alerts', 0)}",
+             f"⏭ Agla auto check: {next_check().strftime('%d %b, %I:%M %p')} IST",
+             f"⚠️ Errors (start se): {HEALTH['errors']} · network errors: {HEALTH['poll_errors']}"]
+    if h.get("last_check_error"):
+        lines.append(f"❗ Last check error: <code>{e(h['last_check_error'][:150])}</code>")
+    if last_err:
+        lines.append(f"❗ Last error ({ago(last_err[0])}): <code>{e(last_err[1][:150])}</code>")
+    with LOCK:
+        lines.append(f"💾 Data: {len(STATE['users'])} users, {len(STATE.get('cache') or {})} frames cache mein")
+    return "\n".join(lines), inline([[("🔄 Refresh", "adm:health")], back_btn()])
+
+
+def find_user(q):
+    """By numeric ID or @username. Returns (id, user dict) or (None, None)."""
+    q = (q or "").strip()
+    with LOCK:
+        if re.fullmatch(r"-?\d+", q) and q in STATE["users"]:
+            return q, STATE["users"][q]
+        if q.startswith("@"):
+            for k, u in STATE["users"].items():
+                if (u.get("username") or "").lower() == q[1:].lower():
+                    return k, u
+    return None, None
+
+
+def user_view(uid_s, u):
+    try:
+        missing = missing_channels(int(uid_s), fresh=True) if REQUIRED_CHANNELS else []
+    except ValueError:
+        missing = []
+    join = "✅ Saare join" if not missing else "❌ Join nahi: " + ", ".join(e(channel_title(c)) for c in missing)
+    status = "🚫 BANNED" if u.get("banned") else ("⛔ Bot block kiya" if u.get("blocked") else "✅ Active")
+    lines = [f"👤 <b>{e(u.get('name') or 'Naam nahi')}</b>"
+             + (f" · @{e(u['username'])}" if u.get("username") else ""),
+             f"🆔 <code>{uid_s}</code> · {status}",
+             f"📅 Joined: {fmt_ts(u.get('joined_ts'), '%d %b %Y')} · last seen: {ago(u.get('last_seen'))}",
+             f"⚙️ ₹{u.get('budget')} tak · {scope_name(u.get('scope'))} · alerts {'ON' if u.get('alerts', True) else 'OFF'}",
+             f"📢 {join}"]
+    favs = u.get("favs") or []
+    lines.append(f"\n⭐ <b>Tracked frames ({len(favs)})</b>")
+    lines += [f"{num_emoji(i)} {e(name_of(f))} · ₹{f.get('price')}" for i, f in enumerate(favs[:10], 1)] or ["-"]
+    if (u.get("last") or {}).get("url"):
+        lines.append(f"\n🔎 Last search: {e(name_of(u['last']))}")
+    ban = ("✅ Unban karo", f"adm:unban:{uid_s}") if u.get("banned") else ("🚫 Ban karo", f"adm:ban:{uid_s}")
+    return "\n".join(lines), inline([[ban], [("👤 Aur user dhoondo", "adm:lookup")], back_btn()])
+
+
+def ban_list_view():
+    with LOCK:
+        banned = [(k, u) for k, u in STATE["users"].items() if u.get("banned")]
+    lines = ["🚫 <b>Ban / Unban</b>\n",
+             "Ban karne ke liye <b>🚫 User ban karo</b> dabao aur uska ID ya @username bhejo."]
+    rows = [[("🚫 User ban karo", "adm:banask")]]
+    if banned:
+        lines.append(f"\n<b>Banned users ({len(banned)})</b>")
+        for k, u in banned[:20]:
+            lines.append(f"• {e(u.get('name') or '-')} · <code>{k}</code>")
+            rows.append([(f"✅ Unban {u.get('name') or k}", f"adm:unban:{k}")])
+    else:
+        lines.append("\nAbhi koi banned nahi hai.")
+    rows.append(back_btn())
+    return "\n".join(lines), inline(rows)
+
+
+def set_ban(uid_s, banned):
+    with LOCK:
+        u = STATE["users"].get(uid_s)
+        if not u:
+            return None
+        u["banned"] = banned
+        u.pop("ban_notified", None)
+    save_state()
+    return u
+
+
+# ---- broadcast
+def confirm_view(p):
+    counts = {t: len(target_ids(t)) for t in TARGETS}
+    tgt = p.get("target", "all")
+    rows = [[(("✅ " if t == tgt else "") + f"{lbl} ({counts[t]})", f"adm:tgt:{t}")] for t, lbl in TARGETS.items()]
+    rows += [[("📩 Pehle mujhe bhejo (test)", "adm:test")],
+             [(f"✅ Abhi bhejo ({counts[tgt]})", "adm:send"), ("⏰ Schedule karo", "adm:sched")],
+             [("❌ Cancel", "adm:cancel")]]
+    return ("👀 <b>Preview upar hai</b>\n\n"
+            f"🎯 Kisko: <b>{TARGETS[tgt]}</b> ({counts[tgt]} users)\n\n"
+            "Target chuno, pehle khud ko test bhejo, phir abhi bhejo ya schedule karo."), inline(rows)
+
+
+def sched_options_view():
+    now = datetime.datetime.now(IST)
+
+    def at(dt):
+        return int(dt.timestamp())
+    tonight = now.replace(hour=20, minute=0, second=0, microsecond=0)
+    if tonight <= now:
+        tonight += datetime.timedelta(days=1)
+    tomorrow = (now + datetime.timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
+    opts = [("⏱ 1 ghante baad", at(now + datetime.timedelta(hours=1))),
+            ("⏱ 3 ghante baad", at(now + datetime.timedelta(hours=3))),
+            (f"🌙 {tonight.strftime('%d %b')} 8 PM", at(tonight)),
+            (f"🌅 {tomorrow.strftime('%d %b')} 10 AM", at(tomorrow))]
+    rows = [[(opts[0][0], f"adm:at:{opts[0][1]}"), (opts[1][0], f"adm:at:{opts[1][1]}")],
+            [(opts[2][0], f"adm:at:{opts[2][1]}"), (opts[3][0], f"adm:at:{opts[3][1]}")],
+            [("⌨️ Time khud likho", "adm:at:custom")],
+            [("⬅️ Wapas", "adm:back")]]
+    return ("⏰ <b>Kab bhejna hai?</b> (India time)\n\n"
+            "<i>Note: scheduled time tak apna original message delete mat karna, "
+            "bot wahi message copy karke bhejta hai.</i>"), inline(rows)
+
+
+def parse_when(text):
+    """'21:30' (today, or tomorrow if past) or '25-11 21:30' -> epoch, IST."""
+    now = datetime.datetime.now(IST)
+    m = re.fullmatch(r"\s*(?:(\d{1,2})[-/](\d{1,2})\s+)?(\d{1,2}):(\d{2})\s*(am|pm)?\s*", text.lower())
+    if not m:
+        return None
+    d, mo, h, mi, ap = m.groups()
+    h, mi = int(h), int(mi)
+    if ap == "pm" and h < 12:
+        h += 12
+    if ap == "am" and h == 12:
+        h = 0
+    if h > 23 or mi > 59:
+        return None
+    try:
+        dt = now.replace(hour=h, minute=mi, second=0, microsecond=0)
+        if d:
+            dt = dt.replace(day=int(d), month=int(mo))
+            if dt < now - datetime.timedelta(minutes=1):
+                dt = dt.replace(year=dt.year + 1)
+        elif dt <= now:
+            dt += datetime.timedelta(days=1)
+    except ValueError:
+        return None
+    return int(dt.timestamp())
+
+
+def add_schedule(admin_chat, p, ts):
+    item = {"id": f"{int(time.time() * 1000) % 10 ** 9}", "admin": admin_chat, "src": p["src"],
+            "target": p.get("target", "all"), "ts": ts}
+    with LOCK:
+        STATE.setdefault("scheduled", []).append(item)
+    save_state()
+    return (f"⏰ <b>Schedule ho gaya!</b>\n\n🕒 {fmt_ts(ts)} IST\n🎯 {TARGETS[item['target']]}\n\n"
+            "Admin panel ke ⏰ Scheduled mein dekh ya cancel kar sakte ho.")
+
+
+def schedlist_view():
+    with LOCK:
+        items = sorted(STATE.get("scheduled") or [], key=lambda x: x["ts"])
+    if not items:
+        return "⏰ <b>Scheduled broadcasts</b>\n\nAbhi kuch schedule nahi hai.", inline([back_btn()])
+    lines = ["⏰ <b>Scheduled broadcasts</b>\n"]
+    rows = []
+    for i, it in enumerate(items, 1):
+        lines.append(f"{num_emoji(i)} {fmt_ts(it['ts'])} · {TARGETS.get(it['target'], it['target'])}")
+        rows.append([(f"❌ {i} cancel karo", f"adm:unsched:{it['id']}")])
+    rows.append(back_btn())
+    return "\n".join(lines), inline(rows)
 
 
 def admin_capture(chat, uid, msg):
-    """While an admin is composing a broadcast, their next message is the content."""
+    """Admin's next message after choosing an action (broadcast content, ID, time)."""
     p = ADMIN_PENDING.get(uid)
-    if not p or p.get("stage") != "await" or not is_admin(uid) or not msg.get("message_id"):
+    if not p or not is_admin(uid) or not msg.get("message_id"):
         return False
     text = (msg.get("text") or "").strip()
     if text in BUTTON_CMD or text.startswith("/"):
-        ADMIN_PENDING.pop(uid, None)       # admin moved on: cancel the broadcast
+        ADMIN_PENDING.pop(uid, None)       # admin moved on: cancel the pending action
         return False
-    with LOCK:
-        total = sum(1 for u in STATE["users"].values() if not u.get("blocked"))
-    ADMIN_PENDING[uid] = {"stage": "confirm", "src": msg["message_id"]}
-    send(chat, f"👀 <b>Preview upar hai.</b>\n\nYe message <b>{total} users</b> ko bot ki taraf se jayega. Bhejun?",
-         inline([[("✅ Haan, sabko bhejo", "adm:send"), ("❌ Cancel", "adm:cancel")]]))
-    return True
+    stage = p.get("stage")
+    if stage == "await":
+        ADMIN_PENDING[uid] = {"stage": "confirm", "src": msg["message_id"], "target": "all"}
+        send(chat, *confirm_view(ADMIN_PENDING[uid]))
+        return True
+    if stage == "sched_time":
+        ts = parse_when(text)
+        if not ts or ts <= time.time():
+            send(chat, "❌ Time samajh nahi aaya. Aise likho: <code>21:30</code> ya <code>25-11 9:30 pm</code>")
+            return True
+        ADMIN_PENDING.pop(uid, None)
+        send(chat, add_schedule(chat, p, ts), inline([back_btn()]))
+        return True
+    if stage in ("lookup", "ban"):
+        uid_s, u = find_user(text)
+        if not u:
+            send(chat, "❌ Ye user nahi mila. Bot use kar chuke user ka <b>ID</b> ya <b>@username</b> bhejo.",
+                 inline([[("❌ Cancel", "adm:cancel")]]))
+            return True
+        ADMIN_PENDING.pop(uid, None)
+        if stage == "ban":
+            if is_admin(uid_s):
+                send(chat, "⚠️ Admin ko ban nahi kar sakte.")
+                return True
+            set_ban(uid_s, True)
+            send(chat, f"🚫 <b>{e(u.get('name') or uid_s)}</b> ban ho gaya.", inline([back_btn()]))
+            return True
+        send(chat, *user_view(uid_s, u))
+        return True
+    return False
 
 
-def broadcast(admin_chat, src_id):
-    with LOCK:
-        targets = [k for k, u in STATE["users"].items() if not u.get("blocked")]
+def broadcast(admin_chat, src_id, target="all"):
+    targets = target_ids(target)
     total, ok, failed, blocked = len(targets), 0, 0, 0
     prog = (send(admin_chat, f"📤 Bhej raha hoon... 0/{total}") or [None])[0]
     for i, chat in enumerate(targets, 1):
@@ -1255,44 +1550,128 @@ def broadcast(admin_chat, src_id):
         if prog and i % 25 == 0:
             edit(admin_chat, prog, f"📤 Bhej raha hoon... {i}/{total}")
     with LOCK:
-        STATE["last_broadcast"] = {"ts": time.time(), "sent": ok, "total": total}
+        STATE["last_broadcast"] = {"ts": time.time(), "sent": ok, "total": total, "target": target}
     save_state()
-    done = (f"✅ <b>Broadcast ho gaya</b>\n\n📨 Pahuncha: <b>{ok}</b>/{total}\n"
+    done = (f"✅ <b>Broadcast ho gaya</b>\n\n🎯 {TARGETS.get(target, target)}\n📨 Pahuncha: <b>{ok}</b>/{total}\n"
             f"❌ Fail: {failed}" + (f" ({blocked} ne bot block kiya hai)" if blocked else ""))
     edit(admin_chat, prog, done) if prog else send(admin_chat, done)
+
+
+def run_broadcast(admin_chat, src_id, target):
+    with BROADCAST_LOCK:              # one at a time; a second one waits its turn
+        broadcast(admin_chat, src_id, target)
+
+
+def scheduler_loop():
+    while True:
+        time.sleep(20)
+        try:
+            now = time.time()
+            with LOCK:
+                due = [x for x in STATE.get("scheduled") or [] if x["ts"] <= now]
+                STATE["scheduled"] = [x for x in STATE.get("scheduled") or [] if x["ts"] > now]
+            if not due:
+                continue
+            save_state()
+            for it in due:
+                send(it["admin"], f"⏰ Scheduled broadcast shuru ({TARGETS.get(it['target'], it['target'])})")
+                run_broadcast(it["admin"], it["src"], it["target"])
+        except Exception as ex:
+            HEALTH["errors"] += 1
+            HEALTH["last_error"] = (time.time(), "scheduler: " + repr(ex))
+            print("scheduler error:", repr(ex), flush=True)
 
 
 def on_admin_callback(cq, chat, uid, val, msg_id):
     if not is_admin(uid):
         return answer(cq, "Ye sirf admin ke liye hai")
-    if val == "refresh":
-        answer(cq, "Updated")
-        return edit(chat, msg_id, *admin_view())
-    if val == "bc":
+    act, _, arg = val.partition(":")
+    p = ADMIN_PENDING.get(uid) or {}
+    views = {"refresh": admin_view, "stats": stats_view, "health": health_view,
+             "banmenu": ban_list_view, "schedlist": schedlist_view}
+    if act in views:
+        ADMIN_PENDING.pop(uid, None)
+        answer(cq)
+        return edit(chat, msg_id, *views[act]())
+    if act == "bc":
         ADMIN_PENDING[uid] = {"stage": "await"}
         answer(cq)
         return edit(chat, msg_id,
                     "📢 <b>Sabko message bhejo</b>\n\n"
-                    "Ab jo message bhejoge (text, photo, video, kuch bhi) wo <b>saare users</b> ko "
-                    "bot ki taraf se jayega.\n\nBhejne se pehle preview aur confirm aayega.",
+                    "Ab jo message bhejoge (text, photo, video, kuch bhi) wahi users ko "
+                    "bot ki taraf se jayega.\n\nUske baad target chuno, khud ko test bhejo, "
+                    "phir abhi bhejo ya schedule karo.",
                     inline([[("❌ Cancel", "adm:cancel")]]))
-    if val == "cancel":
+    if act == "lookup":
+        ADMIN_PENDING[uid] = {"stage": "lookup"}
+        answer(cq)
+        return edit(chat, msg_id, "👤 <b>User dhoondo</b>\n\nUser ka <b>ID</b> ya <b>@username</b> bhejo.",
+                    inline([[("❌ Cancel", "adm:cancel")]]))
+    if act == "banask":
+        ADMIN_PENDING[uid] = {"stage": "ban"}
+        answer(cq)
+        return edit(chat, msg_id, "🚫 <b>User ban karo</b>\n\nJise ban karna hai uska <b>ID</b> ya <b>@username</b> bhejo.",
+                    inline([[("❌ Cancel", "adm:cancel")]]))
+    if act in ("ban", "unban"):
+        if act == "ban" and is_admin(arg):
+            return answer(cq, "Admin ko ban nahi kar sakte", alert=True)
+        u = set_ban(arg, act == "ban")
+        if not u:
+            return answer(cq, "User nahi mila", alert=True)
+        answer(cq, "Ban ho gaya" if act == "ban" else "Unban ho gaya")
+        return edit(chat, msg_id, *user_view(arg, u))
+    if act == "unsched":
+        with LOCK:
+            before = len(STATE.get("scheduled") or [])
+            STATE["scheduled"] = [x for x in STATE.get("scheduled") or [] if x["id"] != arg]
+            removed = before != len(STATE["scheduled"])
+        save_state()
+        answer(cq, "Cancel ho gaya" if removed else "Ye pehle hi chala gaya ya cancel hua")
+        return edit(chat, msg_id, *schedlist_view())
+    if act == "cancel":
         ADMIN_PENDING.pop(uid, None)
         answer(cq, "Cancel")
-        return edit(chat, msg_id, "❌ Broadcast cancel kar diya.")
-    if val == "send":
-        p = ADMIN_PENDING.pop(uid, None)
-        if not p or p.get("stage") != "confirm":
-            return answer(cq, "Ye broadcast pehle hi ho chuka ya cancel hua", alert=True)
-        if not BROADCAST_LOCK.acquire(blocking=False):
-            return answer(cq, "Ek broadcast already chal raha hai", alert=True)
-        answer(cq, "Bhejna shuru")
-        edit(chat, msg_id, "📤 <b>Broadcast shuru ho gaya</b>")
+        return edit(chat, msg_id, "❌ Cancel kar diya.", inline([back_btn()]))
+    # ---- steps that need a captured broadcast message
+    if p.get("stage") not in ("confirm", "sched_time") or not p.get("src"):
+        return answer(cq, "Ye broadcast pehle hi ho chuka ya cancel hua", alert=True)
+    if act == "tgt" and arg in TARGETS:
+        p["target"] = arg
+        answer(cq, TARGETS[arg])
+        return edit(chat, msg_id, *confirm_view(p))
+    if act == "back":
+        p["stage"] = "confirm"
+        answer(cq)
+        return edit(chat, msg_id, *confirm_view(p))
+    if act == "test":
         try:
-            broadcast(chat, p["src"])
-        finally:
-            BROADCAST_LOCK.release()
-        return
+            tg("copyMessage", chat_id=chat, from_chat_id=chat, message_id=p["src"])
+            answer(cq, "Test bheja, users ko aisa dikhega")
+        except Exception:
+            answer(cq, "Test nahi gaya, original message delete to nahi kiya?", alert=True)
+        return send(chat, *confirm_view(p))
+    if act == "sched":
+        answer(cq)
+        return edit(chat, msg_id, *sched_options_view())
+    if act == "at":
+        if arg == "custom":
+            p["stage"] = "sched_time"
+            answer(cq)
+            return edit(chat, msg_id, "⌨️ <b>Time likho</b> (India time)\n\n"
+                                      "Aaj ke liye: <code>21:30</code> ya <code>9:30 pm</code>\n"
+                                      "Kisi aur din: <code>25-11 21:30</code>",
+                        inline([[("⬅️ Wapas", "adm:back")]]))
+        ADMIN_PENDING.pop(uid, None)
+        answer(cq, "Schedule ho gaya")
+        return edit(chat, msg_id, add_schedule(chat, p, int(arg)), inline([back_btn()]))
+    if act == "send":
+        ADMIN_PENDING.pop(uid, None)
+        if BROADCAST_LOCK.locked():
+            answer(cq, "Ek broadcast chal raha hai, ye uske baad jayega")
+        else:
+            answer(cq, "Bhejna shuru")
+        edit(chat, msg_id, f"📤 <b>Broadcast shuru</b> · {TARGETS[p.get('target', 'all')]}")
+        return run_broadcast(chat, p["src"], p.get("target", "all"))
     answer(cq)
 
 
@@ -1319,7 +1698,7 @@ def run_watch(only_chat=None):
             pass
 
     for chat_id, u in users.items():
-        if not u.get("alerts", True) and only_chat is None:
+        if (not u.get("alerts", True) or u.get("banned") or u.get("blocked")) and only_chat is None:
             continue
         if REQUIRED_CHANNELS and only_chat is None and u.get("favs"):
             try:
@@ -1413,8 +1792,15 @@ def watcher_loop():
             time.sleep(max(1, min(60, left)))
         try:
             n = run_watch()
+            with LOCK:
+                STATE["health"] = {"last_check": time.time(), "last_alerts": n}
+            save_state()
             print(now_ist().strftime("%d-%m %I:%M %p IST"), "auto check done, alerts:", n, flush=True)
         except Exception as ex:
+            with LOCK:
+                STATE["health"] = {"last_check": time.time(), "last_alerts": 0,
+                                   "last_check_error": repr(ex)}
+            HEALTH["errors"] += 1
             print("watch error:", ex)
 
 
@@ -1449,6 +1835,7 @@ def main():
         print("Join zaroori:", ", ".join(f"{channel_title(c)} ({c['id']})" for c in REQUIRED_CHANNELS),
               flush=True)
     threading.Thread(target=watcher_loop, daemon=True).start()
+    threading.Thread(target=scheduler_loop, daemon=True).start()
     offset = 0
     allowed = json.dumps(["message", "callback_query", "chat_member"])
     while True:
@@ -1461,6 +1848,7 @@ def main():
                       "Ek hi jagah chalao, warna messages miss honge.", flush=True)
             else:
                 print("poll error:", ex, flush=True)
+            HEALTH["poll_errors"] += 1
             time.sleep(5)
             continue
         for up in ups:
@@ -1488,15 +1876,29 @@ def main():
 
             uid = frm.get("id")
 
-            def work(chat=chat, text=text, cq=cq, uid=uid, first=frm.get("first_name"), msg=msg):
+            def work(chat=chat, text=text, cq=cq, uid=uid, first=frm.get("first_name"),
+                     uname=frm.get("username"), msg=msg):
                 try:
                     u = user(chat)
                     changed = u.pop("blocked", None) is not None   # they are talking to us again
-                    if first and u.get("name") != first:
-                        u["name"] = first
+                    for key, val in (("name", first), ("username", uname)):
+                        if val and u.get(key) != val:
+                            u[key] = val
+                            changed = True
+                    if time.time() - (u.get("last_seen") or 0) > 600:
                         changed = True
+                    u["last_seen"] = time.time()
                     if changed:
                         save_state()
+                    if u.get("banned") and not is_admin(uid):
+                        if cq:
+                            answer(cq, "🚫 Tumhe is bot se block kiya gaya hai", alert=True)
+                        elif not u.get("ban_notified"):
+                            u["ban_notified"] = True
+                            save_state()
+                            send(chat, "🚫 Tumhe is bot se block kar diya gaya hai.\n"
+                                       f"Galti lag rahi hai to {SUPPORT_CONTACT} se baat karo.")
+                        return
                     if not cq and admin_capture(chat, uid, msg):
                         return
                     if not text and not cq:
@@ -1508,9 +1910,11 @@ def main():
                     else:
                         handle(chat, text)
                 except Exception as ex:
+                    HEALTH["errors"] += 1
+                    HEALTH["last_error"] = (time.time(), repr(ex))
                     print("handle error:", repr(ex))
                     if chat:
-                        send(chat, "Kuch gadbad ho gayi, thodi der baad try karo.")
+                        send(chat, "😕 Kuch gadbad ho gayi, thodi der baad try karo.")
             threading.Thread(target=work, daemon=True).start()
 
 
