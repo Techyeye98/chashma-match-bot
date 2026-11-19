@@ -657,8 +657,8 @@ def gate(chat, uid, text, cq):
             return False
         return True
     first = (text or "").strip().split(" ")[0].lower().split("@")[0]
-    if first in ("/help", "/myid") or (text or "").strip() == B_HELP:
-        return True              # contact button and id lookup always work
+    if first in ("/help", "/myid", "/discount") or (text or "").strip() in (B_HELP, B_DISCOUNT):
+        return True              # contact buttons and id lookup always work
     missing = missing_channels(uid)
     if missing:
         send(chat, *join_view(u.get("name"), missing))
@@ -710,6 +710,27 @@ def support_markup():
                                   "url": SUPPORT_URL}]]}
 
 
+def discount_url(frame=None):
+    msg = "Hi, mujhe Lenskart frame discount pe kharidna hai."
+    if frame and frame.get("url"):
+        msg = f"Hi, mujhe ye Lenskart frame discount pe kharidna hai: {name_of(frame)} {frame['url']}"
+    return f"https://t.me/{SUPPORT_USERNAME}?text=" + urllib.parse.quote(msg)
+
+
+def discount_view(u):
+    last = u.get("last") if (u.get("last") or {}).get("url") else None
+    text = ("🛍 <b>Frame discount pe kharido</b>\n\n"
+            "Pasand ka frame aur bhi kam daam mein chahiye? Hum tumhe Lenskart pe "
+            "<b>extra discount</b> pe frame dilwa sakte hain.\n\n"
+            "Neeche button dabao, seedha humse baat karo.")
+    rows = []
+    if last:
+        text += f"\n\n<i>Tumhara last frame: {e(name_of(last))}</i>"
+        rows.append([{"text": f"🛍 {name_of(last)} discount pe chahiye", "url": discount_url(last)}])
+    rows.append([{"text": "💬 Discount ke liye message karo", "url": discount_url()}])
+    return text, {"inline_keyboard": rows}
+
+
 def welcome_text(u):
     hi = f"👋 <b>Namaste {e(u.get('name'))}!</b>" if u.get("name") else "👋 <b>Namaste!</b>"
     return (f"{hi}\n\n"
@@ -737,7 +758,8 @@ def guide_text():
         f"{B_SCOPE} · offer section ya poora Lenskart\n"
         f"{B_NEW} · pichhle 7 din ke naye offer frames\n"
         f"{B_CHECK} · stock aur price abhi check karo\n"
-        f"{B_SETTINGS} · settings aur alerts on/off\n\n"
+        f"{B_SETTINGS} · settings aur alerts on/off\n"
+        f"{B_DISCOUNT} · frame extra discount pe lene ke liye humse baat karo\n\n"
         "<b>Stock</b>\n"
         "✅ 50+ · araam se lo\n"
         "⚠️ 11-50 · kam bacha hai\n"
@@ -762,15 +784,16 @@ B_ALERTS = "🔔 Alerts"
 B_SETTINGS = "⚙️ Settings"
 B_GUIDE = "📖 Guide"
 B_HELP = "❓ Help"
+B_DISCOUNT = "🛍 Discount pe kharido"
 B_ADMIN = "🛠 Admin panel"
 
 BUTTON_CMD = {B_FIND: "/find", B_FAVS: "/favs", B_BUDGET: "/budget", B_SCOPE: "/scope",
               B_NEW: "/new", B_CHECK: "/check", B_ALERTS: "/alerts",
-              B_SETTINGS: "/settings", B_GUIDE: "/guide", B_HELP: "/help", B_ADMIN: "/admin"}
+              B_SETTINGS: "/settings", B_GUIDE: "/guide", B_HELP: "/help", B_DISCOUNT: "/discount", B_ADMIN: "/admin"}
 
 MAIN_KB = {
     "keyboard": [[B_FIND, B_FAVS], [B_BUDGET, B_SCOPE], [B_NEW, B_CHECK],
-                 [B_SETTINGS, B_GUIDE], [B_HELP]],
+                 [B_SETTINGS, B_GUIDE], [B_DISCOUNT, B_HELP]],
     "resize_keyboard": True,
     "is_persistent": True,
     "input_field_placeholder": "Lenskart frame ka link paste karo...",
@@ -785,6 +808,7 @@ COMMANDS = [
     ("check", "Abhi stock aur price check karo"),
     ("settings", "Settings aur alerts"),
     ("guide", "Bot kaise use karein"),
+    ("discount", "Frame discount pe kharido"),
     ("help", "Offers aur help ke liye contact"),
 ]
 
@@ -997,6 +1021,7 @@ def do_match(chat_id, u, t, scope=None):
         rows.append([{"text": f"🛒 {i}", "url": c["url"]} for i, (_, c) in enumerate(ranked, 1)])
     if t.get("id"):
         rows.append([{"text": "⭐ Mera frame track karo", "callback_data": f"fav:{t['id']}"}])
+        rows.append([{"text": "🛍 Ye frame discount pe chahiye", "url": discount_url(t)}])
         if scope == "offer":
             rows.append([{"text": "🌐 Poore Lenskart mein dhoondo", "callback_data": f"simall:{t['id']}"}])
     if ranked:
@@ -1024,6 +1049,8 @@ def handle(chat_id, text):
         return send(chat_id, "🤔 Ye command samajh nahi aaya. Neeche ke buttons use karo.", kb_for(chat_id))
     if cmd == "/help":
         return send(chat_id, support_text(), support_markup())
+    if cmd == "/discount":
+        return send(chat_id, *discount_view(u))
     if cmd == "/guide":
         return send(chat_id, guide_text(), kb_for(chat_id))
     if cmd == "/find":
