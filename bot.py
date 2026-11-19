@@ -22,10 +22,11 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(HERE, "data")
+# FM_ENV_FILE / FM_DATA_DIR let a separate test bot run next to the real one (see test-bot.bat)
+DATA_DIR = os.path.join(HERE, os.environ.get("FM_DATA_DIR") or "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 STATE_FILE = os.path.join(DATA_DIR, "state.json")
-ENV_FILE = os.path.join(HERE, ".env")
+ENV_FILE = os.path.join(HERE, os.environ.get("FM_ENV_FILE") or ".env")
 
 
 def load_env():
@@ -38,7 +39,8 @@ def load_env():
                     continue
                 k, v = line.split("=", 1)
                 env[k.strip()] = v.strip().strip('"').strip("'")
-    for k in ("BOT_TOKEN", "CHECK_TIMES", "DEFAULT_BUDGET", "ALERT_SCORE", "REQUIRED_CHANNELS"):
+    for k in ("BOT_TOKEN", "CHECK_TIMES", "DEFAULT_BUDGET", "ALERT_SCORE", "REQUIRED_CHANNELS",
+              "ADMIN_IDS"):
         if os.environ.get(k):
             env[k] = os.environ[k]
     return env
@@ -555,7 +557,7 @@ def parse_channels(s):
 
 
 REQUIRED_CHANNELS = parse_channels(ENV.get("REQUIRED_CHANNELS"))
-JOIN_OK_SECONDS = 300            # re-check a member at least every 5 min
+JOIN_OK_SECONDS = 3600           # re-check a member at most once an hour (leave events lock instantly)
 JOINED_CACHE = {}                # user_id -> time last confirmed as member
 CHANNEL_TITLES = {}
 
@@ -631,7 +633,7 @@ def join_view(name, missing, left_from=None):
 
 def gate(chat, uid, text, cq):
     """True when the update may go to the normal handlers."""
-    if not REQUIRED_CHANNELS:
+    if not REQUIRED_CHANNELS or is_admin(uid):
         return True
     u = user(chat)
     if cq:
@@ -646,7 +648,7 @@ def gate(chat, uid, text, cq):
             answer(cq, "Unlock ho gaya! 🎉")
             edit(chat, msg_id, f"🔓 <b>Unlock ho gaya!</b>\n\nShukriya {e(u.get('name') or '')} 🙏 "
                                "Ab bot ke saare features tumhare hain.")
-            send(chat, welcome_text(u), MAIN_KB)
+            send(chat, welcome_text(u), kb_for(chat))
             return False
         missing = missing_channels(uid)
         if missing:
@@ -655,8 +657,8 @@ def gate(chat, uid, text, cq):
             return False
         return True
     first = (text or "").strip().split(" ")[0].lower().split("@")[0]
-    if first == "/help" or (text or "").strip() == B_HELP:
-        return True              # contact button always works
+    if first in ("/help", "/myid") or (text or "").strip() == B_HELP:
+        return True              # contact button and id lookup always work
     missing = missing_channels(uid)
     if missing:
         send(chat, *join_view(u.get("name"), missing))
@@ -760,10 +762,11 @@ B_ALERTS = "🔔 Alerts"
 B_SETTINGS = "⚙️ Settings"
 B_GUIDE = "📖 Guide"
 B_HELP = "❓ Help"
+B_ADMIN = "🛠 Admin panel"
 
 BUTTON_CMD = {B_FIND: "/find", B_FAVS: "/favs", B_BUDGET: "/budget", B_SCOPE: "/scope",
               B_NEW: "/new", B_CHECK: "/check", B_ALERTS: "/alerts",
-              B_SETTINGS: "/settings", B_GUIDE: "/guide", B_HELP: "/help"}
+              B_SETTINGS: "/settings", B_GUIDE: "/guide", B_HELP: "/help", B_ADMIN: "/admin"}
 
 MAIN_KB = {
     "keyboard": [[B_FIND, B_FAVS], [B_BUDGET, B_SCOPE], [B_NEW, B_CHECK],
@@ -816,6 +819,12 @@ def send(chat_id, text, markup=None):
         try:
             r = tg("sendMessage", **params)
             ids.append(((r or {}).get("result") or {}).get("message_id"))
+        except urllib.error.HTTPError as ex:
+            if ex.code == 403:           # user blocked the bot
+                with LOCK:
+                    if str(chat_id) in STATE["users"]:
+                        STATE["users"][str(chat_id)]["blocked"] = True
+            print("send failed:", ex)
         except Exception as ex:
             print("send failed:", ex)
     return ids
@@ -1006,11 +1015,17 @@ def handle(chat_id, text):
 
     if cmd == "/start":
         save_state()
-        return send(chat_id, welcome_text(u), MAIN_KB)
+        return send(chat_id, welcome_text(u), kb_for(chat_id))
+    if cmd == "/myid":
+        return send(chat_id, f"🆔 Tumhara Telegram ID: <code>{chat_id}</code>")
+    if cmd == "/admin":
+        if is_admin(chat_id):
+            return send(chat_id, *admin_view())
+        return send(chat_id, "🤔 Ye command samajh nahi aaya. Neeche ke buttons use karo.", kb_for(chat_id))
     if cmd == "/help":
         return send(chat_id, support_text(), support_markup())
     if cmd == "/guide":
-        return send(chat_id, guide_text(), MAIN_KB)
+        return send(chat_id, guide_text(), kb_for(chat_id))
     if cmd == "/find":
         return send(chat_id, "🔎 <b>Frame dhoondo</b>\n\n"
                              "Lenskart app ya website se frame ka <b>link copy karke</b> yahan paste karo.\n\n"
@@ -1062,7 +1077,7 @@ def handle(chat_id, text):
                           f"<i>Agla auto check: {next_check().strftime('%I:%M %p').lstrip('0')} IST</i>")
         return
     if cmd.startswith("/"):
-        return send(chat_id, "🤔 Ye command samajh nahi aaya. Neeche ke buttons use karo.", MAIN_KB)
+        return send(chat_id, "🤔 Ye command samajh nahi aaya. Neeche ke buttons use karo.", kb_for(chat_id))
 
     try:
         t = target_from_text(text)
@@ -1072,7 +1087,7 @@ def handle(chat_id, text):
     if not t:
         return send(chat_id, "🤔 <b>Ye samajh nahi aaya</b>\n\n"
                              "Lenskart frame ka <b>link</b> bhejo, ya specs aise likho:\n"
-                             "<code>50-20-145 136mm black square</code>", MAIN_KB)
+                             "<code>50-20-145 136mm black square</code>", kb_for(chat_id))
     do_match(chat_id, u, t)
 
 
@@ -1084,6 +1099,8 @@ def on_callback(cq):
         return answer(cq)
     u = user(chat_id)
     kind, _, val = data.partition(":")
+    if kind == "adm":
+        return on_admin_callback(cq, chat_id, (cq.get("from") or {}).get("id"), val, msg_id)
     if kind == "fav":
         answer(cq, "⭐ Track ho raha hai")
         return send(chat_id, add_fav(u, product(val)))
@@ -1122,6 +1139,133 @@ def on_callback(cq):
         save_state()
         answer(cq, "Alerts " + val.upper())
         return edit(chat_id, msg_id, *settings_view(u))
+    answer(cq)
+
+
+# ---------------------------------------------------------------- admin panel
+ADMIN_IDS = {int(x) for x in re.findall(r"-?\d+", ENV.get("ADMIN_IDS") or "")}
+ADMIN_PENDING = {}               # admin user id -> {"stage": "await"|"confirm", "src": msg id}
+BROADCAST_LOCK = threading.Lock()
+
+
+def is_admin(uid):
+    try:
+        return int(uid) in ADMIN_IDS
+    except (TypeError, ValueError):
+        return False
+
+
+def kb_for(chat_id):
+    if not is_admin(chat_id):
+        return MAIN_KB
+    kb = dict(MAIN_KB)
+    kb["keyboard"] = MAIN_KB["keyboard"] + [[B_ADMIN]]
+    return kb
+
+
+def admin_view():
+    with LOCK:
+        users = list(STATE["users"].values())
+        last = STATE.get("last_broadcast")
+    blocked = sum(1 for u in users if u.get("blocked"))
+    lines = ["🛠 <b>Admin panel</b>\n",
+             f"👥 Users: <b>{len(users)}</b> (active {len(users) - blocked}, bot block kiya {blocked})",
+             f"⭐ Tracked frames: <b>{sum(len(u.get('favs') or []) for u in users)}</b>",
+             f"🔔 Alerts ON: <b>{sum(1 for u in users if u.get('alerts', True))}</b>"]
+    if REQUIRED_CHANNELS:
+        lines.append("📢 Join zaroori: " + ", ".join(e(channel_title(c)) for c in REQUIRED_CHANNELS))
+    if last:
+        when = datetime.datetime.fromtimestamp(last["ts"], IST).strftime("%d %b, %I:%M %p")
+        lines.append(f"📨 Last broadcast: {when} · {last['sent']}/{last['total']} pahuncha")
+    return "\n".join(lines), inline([[("📢 Sabko message bhejo", "adm:bc")],
+                                     [("🔄 Refresh", "adm:refresh")]])
+
+
+def admin_capture(chat, uid, msg):
+    """While an admin is composing a broadcast, their next message is the content."""
+    p = ADMIN_PENDING.get(uid)
+    if not p or p.get("stage") != "await" or not is_admin(uid) or not msg.get("message_id"):
+        return False
+    text = (msg.get("text") or "").strip()
+    if text in BUTTON_CMD or text.startswith("/"):
+        ADMIN_PENDING.pop(uid, None)       # admin moved on: cancel the broadcast
+        return False
+    with LOCK:
+        total = sum(1 for u in STATE["users"].values() if not u.get("blocked"))
+    ADMIN_PENDING[uid] = {"stage": "confirm", "src": msg["message_id"]}
+    send(chat, f"👀 <b>Preview upar hai.</b>\n\nYe message <b>{total} users</b> ko bot ki taraf se jayega. Bhejun?",
+         inline([[("✅ Haan, sabko bhejo", "adm:send"), ("❌ Cancel", "adm:cancel")]]))
+    return True
+
+
+def broadcast(admin_chat, src_id):
+    with LOCK:
+        targets = [k for k, u in STATE["users"].items() if not u.get("blocked")]
+    total, ok, failed, blocked = len(targets), 0, 0, 0
+    prog = (send(admin_chat, f"📤 Bhej raha hoon... 0/{total}") or [None])[0]
+    for i, chat in enumerate(targets, 1):
+        for attempt in range(2):
+            try:
+                tg("copyMessage", chat_id=chat, from_chat_id=admin_chat, message_id=src_id)
+                ok += 1
+                break
+            except urllib.error.HTTPError as ex:
+                body = ex.read().decode(errors="ignore")
+                if ex.code == 429 and attempt == 0:
+                    wait = (json.loads(body or "{}").get("parameters") or {}).get("retry_after", 5)
+                    time.sleep(int(wait) + 1)
+                    continue
+                failed += 1
+                if ex.code == 403:
+                    blocked += 1
+                    with LOCK:
+                        STATE["users"].get(chat, {})["blocked"] = True
+                break
+            except Exception:
+                failed += 1
+                break
+        time.sleep(0.05)                    # stay under Telegram's ~30 msgs/sec limit
+        if prog and i % 25 == 0:
+            edit(admin_chat, prog, f"📤 Bhej raha hoon... {i}/{total}")
+    with LOCK:
+        STATE["last_broadcast"] = {"ts": time.time(), "sent": ok, "total": total}
+    save_state()
+    done = (f"✅ <b>Broadcast ho gaya</b>\n\n📨 Pahuncha: <b>{ok}</b>/{total}\n"
+            f"❌ Fail: {failed}" + (f" ({blocked} ne bot block kiya hai)" if blocked else ""))
+    edit(admin_chat, prog, done) if prog else send(admin_chat, done)
+
+
+def on_admin_callback(cq, chat, uid, val, msg_id):
+    if not is_admin(uid):
+        return answer(cq, "Ye sirf admin ke liye hai")
+    if val == "refresh":
+        answer(cq, "Updated")
+        return edit(chat, msg_id, *admin_view())
+    if val == "bc":
+        ADMIN_PENDING[uid] = {"stage": "await"}
+        answer(cq)
+        return edit(chat, msg_id,
+                    "📢 <b>Sabko message bhejo</b>\n\n"
+                    "Ab jo message bhejoge (text, photo, video, kuch bhi) wo <b>saare users</b> ko "
+                    "bot ki taraf se jayega.\n\nBhejne se pehle preview aur confirm aayega.",
+                    inline([[("❌ Cancel", "adm:cancel")]]))
+    if val == "cancel":
+        ADMIN_PENDING.pop(uid, None)
+        answer(cq, "Cancel")
+        return edit(chat, msg_id, "❌ Broadcast cancel kar diya.")
+    if val == "send":
+        p = ADMIN_PENDING.pop(uid, None)
+        if not p or p.get("stage") != "confirm":
+            return answer(cq, "Ye broadcast pehle hi ho chuka ya cancel hua", alert=True)
+        if not BROADCAST_LOCK.acquire(blocking=False):
+            return answer(cq, "Ek broadcast already chal raha hai", alert=True)
+        answer(cq, "Bhejna shuru")
+        edit(chat, msg_id, "📤 <b>Broadcast shuru ho gaya</b>")
+        try:
+            broadcast(chat, p["src"])
+        finally:
+            BROADCAST_LOCK.release()
+        return
     answer(cq)
 
 
@@ -1307,23 +1451,29 @@ def main():
             cq = up.get("callback_query")
             msg = up.get("message") or {}
             text, chat = msg.get("text"), (msg.get("chat") or {}).get("id")
+            frm = (cq or msg).get("from") or {}
             if cq:
                 chat = ((cq.get("message") or {}).get("chat") or {}).get("id")
-            elif not text or not chat:
+            elif not chat or not (text or ADMIN_PENDING.get(frm.get("id"))):
                 continue
             if (((cq or {}).get("message") or msg).get("chat") or {}).get("type") not in (None, "private"):
                 continue         # only private chats with the bot
 
-            frm = (cq or msg).get("from") or {}
             uid = frm.get("id")
 
-            def work(chat=chat, text=text, cq=cq, uid=uid, first=frm.get("first_name")):
+            def work(chat=chat, text=text, cq=cq, uid=uid, first=frm.get("first_name"), msg=msg):
                 try:
-                    if first:
-                        u = user(chat)
-                        if u.get("name") != first:
-                            u["name"] = first
-                            save_state()
+                    u = user(chat)
+                    changed = u.pop("blocked", None) is not None   # they are talking to us again
+                    if first and u.get("name") != first:
+                        u["name"] = first
+                        changed = True
+                    if changed:
+                        save_state()
+                    if not cq and admin_capture(chat, uid, msg):
+                        return
+                    if not text and not cq:
+                        return
                     if not gate(chat, uid, text, cq):
                         return
                     if cq:

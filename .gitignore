@@ -7,3 +7,7 @@ data/
 # python
 __pycache__/
 *.pyc
+
+# test bot (laptop preview)
+.env.test
+data-test/
