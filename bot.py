@@ -393,12 +393,50 @@ def name_of(p):
     return f"{p.get('brand') or ''} {p.get('model') or ''}".strip()
 
 
+RANK = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+NUMS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+
+
+def num_emoji(i):
+    return NUMS[i - 1] if 1 <= i <= len(NUMS) else f"{i}."
+
+
+def specs_line(p):
+    bits = [dims(p)]
+    if p.get("width") is not None:
+        bits.append(f"{fmt_num(p['width'])}mm wide")
+    if p.get("height") is not None:
+        bits.append(f"{fmt_num(p['height'])}mm high")
+    if p.get("weight") is not None:
+        bits.append(f"{fmt_num(p['weight'])}g")
+    return "📐 " + " · ".join(bits)
+
+
+def look_line(p):
+    bits = [x for x in (p.get("colour"), p.get("shape"), p.get("material")) if x]
+    return "🎨 " + (" · ".join(e(x) for x in bits) if bits else "-")
+
+
+def price_html(p):
+    price, mrp = p.get("price"), p.get("mrp")
+    if not price:
+        return "💰 Price: -"
+    out = f"💰 <b>₹{price}</b>"
+    if mrp and mrp > price:
+        out += f" <s>₹{mrp}</s> · {round((mrp - price) * 100 / mrp)}% off"
+    return out
+
+
+def link_html(p, text="Lenskart pe dekho ↗"):
+    return f'🔗 <a href="{e(p.get("url"))}">{text}</a>' if p.get("url") else ""
+
+
 def describe(p):
-    return (f"<b>{e(name_of(p))}</b>\n"
-            f"Size: {dims(p)} | width {fmt_num(p.get('width'), 'mm')} | "
-            f"height {fmt_num(p.get('height'), 'mm')} | {fmt_num(p.get('weight'), 'g')}\n"
-            f"{e(p.get('colour'))} | {e(p.get('shape'))} | {e(p.get('material'))}"
-            + (f"\n{stock_label(p.get('qty'))}" if p.get("id") else ""))
+    title = name_of(p) if p.get("id") else "Tumhare specs"
+    lines = [f"<b>{e(title)}</b>", specs_line(p), look_line(p)]
+    if p.get("id"):
+        lines.append(f"{price_html(p)} · {stock_label(p.get('qty'))}")
+    return "\n".join(lines)
 
 
 def diff_line(t, c):
@@ -408,7 +446,7 @@ def diff_line(t, c):
             continue
         d = c[key] - t[key]
         if d:
-            out.append(f"{key} {'+' if d > 0 else ''}{d:g}mm")
+            out.append(f"{key} {'+' if d > 0 else '−'}{abs(d):g}mm")
     if t.get("weight") is not None and c.get("weight") is not None:
         d = c["weight"] - t["weight"]
         if abs(d) >= 3:
@@ -424,7 +462,7 @@ def diff_line(t, c):
 
 
 def label(s):
-    return "Bahut close" if s <= 8 else ("Close" if s <= 14 else "Thoda alag")
+    return "🟢 Bahut close" if s <= 8 else ("🟡 Close" if s <= 14 else "🟠 Thoda alag")
 
 
 def stock_label(q):
@@ -435,10 +473,10 @@ def stock_label(q):
     if q <= 0:
         return "❌ Out of stock"
     if q <= 10:
-        return f"🔥 Sirf {q} piece bache, jaldi lo"
+        return f"🔥 Sirf {q} bache, jaldi lo"
     if q <= 50:
-        return f"⚠️ Kam stock: {q} piece"
-    return f"✅ Achha stock: {q} piece"
+        return f"⚠️ Kam stock ({q})"
+    return f"✅ Stock mein ({q})"
 
 
 def refresh_live(items):
@@ -448,6 +486,7 @@ def refresh_live(items):
             p = product(c["id"])
             c["qty"] = p["qty"]
             c["price"] = c.get("price") or p["price"]
+            c["mrp"] = c.get("mrp") or p.get("mrp")
         except Exception:
             c.setdefault("qty", None)
     with ThreadPoolExecutor(8) as ex:
@@ -458,27 +497,37 @@ def scope_name(scope):
     return "poora Lenskart" if scope == "all" else "offer section"
 
 
+def match_card(i, s, t, c):
+    rating = f" · ⭐ {c['rating']}" if c.get("rating") else ""
+    return "\n".join(x for x in (
+        f"{RANK[i - 1] if i <= len(RANK) else i} <b>{e(name_of(c))}</b>",
+        f"{label(s)}{rating}",
+        price_html(c),
+        specs_line(c),
+        look_line(c),
+        f"📦 {stock_label(c.get('qty'))}",
+        f"↔️ <i>Farak: {e(diff_line(t, c))}</i>",
+        link_html(c),
+    ) if x)
+
+
 def match_text(t, budget, scope):
     """Returns (message text, ranked matches)."""
     ranked, total = find_matches(t, budget, scope)
-    head = (f"🎯 <b>Tumhara frame</b>\n{describe(t)}\n\n"
-            f"🔎 {scope_name(scope)} mein ₹{budget} tak ke {total} frames check kiye.\n")
+    head = f"🎯 <b>Tumhara frame</b>\n{describe(t)}"
     if t.get("width_guess"):
-        head += "(Frame width nahi diya tha, to andaza lagaya hai.)\n"
+        head += "\n<i>(Frame width nahi diya tha, andaza lagaya hai)</i>"
     if not ranked:
-        return head + "\nKoi match nahi mila. Budget badha ke ya poora Lenskart chun ke try karo.", []
-    lines = [head]
-    for i, (s, c) in enumerate(ranked, 1):
-        rating = f" | ⭐ {c['rating']}" if c.get("rating") else ""
-        lines.append(
-            f"<b>{i}. {e(name_of(c))}</b> - ₹{c['price']}{rating}\n"
-            f"{label(s)} | {dims(c)}, width {fmt_num(c['width'], 'mm')}, "
-            f"height {fmt_num(c['height'], 'mm')}, {fmt_num(c['weight'], 'g')}\n"
-            f"{e(c['colour'])} | {e(c['shape'])} | {e(c['material'])}\n"
-            f"{stock_label(c.get('qty'))}\n"
-            f"Farak: {e(diff_line(t, c))}\n{e(c['url'])}\n")
-    return "\n".join(lines), ranked
+        return (head + f"\n\n😕 <b>Koi match nahi mila</b>\n{scope_name(scope)} mein ₹{budget} tak "
+                f"{total} frames dekhe. Budget badhao ya poore Lenskart mein dhoondo."), []
+    parts = [head,
+             f"{DIV}\n🔎 <b>Top {len(ranked)} matches</b> · {scope_name(scope)} · ₹{budget} tak\n"
+             f"<i>{total} frames check kiye</i>"]
+    parts += [match_card(i, s, t, c) for i, (s, c) in enumerate(ranked, 1)]
+    return "\n\n".join(parts), ranked
 
+
+DIV = "━━━━━━━━━━━━━━━"
 
 SUPPORT_CONTACT = "@Techyangel"
 SUPPORT_USERNAME = SUPPORT_CONTACT.lstrip("@")
@@ -506,9 +555,20 @@ def parse_channels(s):
 
 
 REQUIRED_CHANNELS = parse_channels(ENV.get("REQUIRED_CHANNELS"))
-JOIN_OK_SECONDS = 600            # re-check a member at most every 10 min
+JOIN_OK_SECONDS = 300            # re-check a member at least every 5 min
 JOINED_CACHE = {}                # user_id -> time last confirmed as member
 CHANNEL_TITLES = {}
+
+
+def resolve_channels():
+    """Learn each channel's numeric id and title, so leave events can be matched."""
+    for ch in REQUIRED_CHANNELS:
+        try:
+            r = tg("getChat", chat_id=ch["id"])["result"]
+            ch["num"] = str(r.get("id"))
+            CHANNEL_TITLES[ch["id"]] = r.get("title")
+        except Exception as ex:
+            print(f"channel {ch['id']} check failed (bot ko admin banao):", ex, flush=True)
 
 
 def channel_title(ch):
@@ -538,46 +598,60 @@ def missing_channels(user_id, fresh=False):
             ok = True
         if not ok:
             missing.append(ch)
-    if not missing:
+    if missing:
+        JOINED_CACHE.pop(user_id, None)
+    else:
         JOINED_CACHE[user_id] = time.time()
     return missing
 
 
-def join_prompt(chat_id, missing):
-    rows = [[{"text": f"📢 Join karo: {channel_title(ch)}", "url": ch["link"]}] for ch in missing]
-    rows.append([{"text": "✅ Join kar liya", "callback_data": "joined"}])
-    send(chat_id, "🔒 <b>Bot use karne ke liye pehle hamare channel join karo</b>\n\n"
-                  "Neeche ke channel join karo, phir <b>✅ Join kar liya</b> dabao.",
-         {"inline_keyboard": rows})
+def join_view(name, missing, left_from=None):
+    """Join / re-join screen with progress. Returns (text, markup)."""
+    total = len(REQUIRED_CHANNELS)
+    done = total - len(missing)
+    miss_ids = {ch["id"] for ch in missing}
+    bar = "🟩" * done + "⬜" * len(missing)
+    hi = f"Hey {e(name)}! " if name else ""
+    if left_from:
+        top = (f"🔒 <b>Bot lock ho gaya</b>\n\n"
+               f"{hi}Tumne <b>{e(channel_title(left_from))}</b> chhod diya. "
+               "Bot aur saare alerts tab tak band rahenge jab tak tum wapas join nahi karte.")
+    else:
+        top = (f"🔒 <b>Bot unlock karo</b>\n\n"
+               f"{hi}Chashma Match bilkul free hai. Bas hamare channels join karo, "
+               "wahan roz Lenskart aur tech ke best deals aate hain. 🎁")
+    status = "\n".join(
+        f"{'⬜' if ch['id'] in miss_ids else '✅'} {e(channel_title(ch))}" for ch in REQUIRED_CHANNELS)
+    text = (f"{top}\n\n<b>Progress</b>  {bar}  {done}/{total}\n{status}\n\n"
+            "👇 Neeche se join karo, phir <b>Maine join kar liya</b> dabao.")
+    rows = [[{"text": f"➕ Join: {channel_title(ch)}", "url": ch["link"]}] for ch in missing]
+    rows.append([{"text": "✅ Maine join kar liya, unlock karo", "callback_data": "joined"}])
+    return text, {"inline_keyboard": rows}
 
 
 def gate(chat, uid, text, cq):
     """True when the update may go to the normal handlers."""
     if not REQUIRED_CHANNELS:
         return True
+    u = user(chat)
     if cq:
+        msg_id = (cq.get("message") or {}).get("message_id")
         if (cq.get("data") or "") == "joined":
             missing = missing_channels(uid, fresh=True)
             if missing:
-                try:
-                    tg("answerCallbackQuery", callback_query_id=cq["id"], show_alert="true",
-                       text="Abhi saare channel join nahi hue. Join karke dobara dabao.")
-                except Exception:
-                    pass
+                names = ", ".join(channel_title(ch) for ch in missing)
+                answer(cq, f"Abhi ye join nahi hua: {names}. Join karke dobara dabao.", alert=True)
+                edit(chat, msg_id, *join_view(u.get("name"), missing))
                 return False
-            try:
-                tg("answerCallbackQuery", callback_query_id=cq["id"], text="Shukriya! 🎉")
-            except Exception:
-                pass
-            send(chat, "✅ Shukriya! Ab bot use kar sakte ho.\n\n" + help_text(), MAIN_KB)
+            answer(cq, "Unlock ho gaya! 🎉")
+            edit(chat, msg_id, f"🔓 <b>Unlock ho gaya!</b>\n\nShukriya {e(u.get('name') or '')} 🙏 "
+                               "Ab bot ke saare features tumhare hain.")
+            send(chat, welcome_text(u), MAIN_KB)
             return False
         missing = missing_channels(uid)
         if missing:
-            try:
-                tg("answerCallbackQuery", callback_query_id=cq["id"])
-            except Exception:
-                pass
-            join_prompt(chat, missing)
+            answer(cq, "Pehle channels join karo 🔒")
+            send(chat, *join_view(u.get("name"), missing))
             return False
         return True
     first = (text or "").strip().split(" ")[0].lower().split("@")[0]
@@ -585,11 +659,43 @@ def gate(chat, uid, text, cq):
         return True              # contact button always works
     missing = missing_channels(uid)
     if missing:
-        join_prompt(chat, missing)
+        send(chat, *join_view(u.get("name"), missing))
         return False
     return True
 
 
+def channel_of(chat):
+    cid = str(chat.get("id"))
+    uname = ("@" + chat["username"]).lower() if chat.get("username") else None
+    for ch in REQUIRED_CHANNELS:
+        if ch.get("num") == cid or ch["id"] == cid or (uname and ch["id"].lower() == uname):
+            return ch
+    return None
+
+
+def on_chat_member(upd):
+    """A user joined or left one of the required channels."""
+    ch = channel_of(upd.get("chat") or {})
+    new = upd.get("new_chat_member") or {}
+    uid = (new.get("user") or {}).get("id")
+    if not ch or not uid or (new.get("user") or {}).get("is_bot"):
+        return
+    st = new.get("status")
+    left = st in ("left", "kicked") or (st == "restricted" and not new.get("is_member"))
+    if not left:
+        return
+    JOINED_CACHE.pop(uid, None)
+    with LOCK:
+        known = str(uid) in STATE["users"]
+    if not known:
+        return                   # never used the bot, nothing to lock
+    u = user(uid)
+    missing = missing_channels(uid, fresh=True) or [ch]
+    print(f"user {uid} left {ch['id']}, bot locked for them", flush=True)
+    send(uid, *join_view(u.get("name"), missing, left_from=ch))
+
+
+# ---------------------------------------------------------------- texts
 def support_text():
     return ("📩 <b>Lenskart offers aur help</b>\n\n"
             "Lenskart ke latest offers, best deal ya bot use karne mein koi dikkat ho, "
@@ -602,36 +708,43 @@ def support_markup():
                                   "url": SUPPORT_URL}]]}
 
 
-def help_text():
+def welcome_text(u):
+    hi = f"👋 <b>Namaste {e(u.get('name'))}!</b>" if u.get("name") else "👋 <b>Namaste!</b>"
+    return (f"{hi}\n\n"
+            "👓 <b>Chashma Match</b> mein swagat hai.\n"
+            "Pasand ka frame mehenga hai? Main Lenskart offer mein uske jaise saste frames dhoondta hoon.\n\n"
+            "<b>Kaise kaam karta hai</b>\n"
+            "1️⃣ Lenskart frame ka link bhejo\n"
+            "2️⃣ Top 5 closest frames milenge, farak ke saath\n"
+            "3️⃣ ⭐ dabao, stock aur price ke alerts pao\n\n"
+            f"⚙️ Abhi: <b>₹{u['budget']} tak</b> · <b>{scope_name(u['scope'])}</b>\n"
+            f"⏰ Auto check: roz {times_text()}\n\n"
+            "👇 Shuru karo: frame ka link yahan paste karo")
+
+
+def guide_text():
     return (
-        "👓 <b>Frame Matcher</b>\n\n"
-        "Apne pasand ke frame ka Lenskart link bhejo. Main offer section mein "
-        "uske sabse close frames dhoond dunga, farak ke saath.\n\n"
-        "<b>Kaise use karein</b>\n"
-        "• Lenskart product link bhejo\n"
+        "📖 <b>Guide</b>\n\n"
+        "<b>Frame kaise dhoondein</b>\n"
+        "• Lenskart app ya website se frame ka link copy karke bhejo\n"
         "• Ya specs likho: <code>50-20-145 136mm black square acetate</code>\n\n"
-        "<b>Neeche ke buttons</b>\n"
-        "🔎 Frame dhoondo - link ya specs bhejne ka tareeka\n"
-        "⭐ Tracked frames - jo frames track ho rahe hain, stock aur price ke saath\n"
-        "💰 Budget - max price chuno\n"
-        "🌐 Kahan dhoondu - offer section ya poora Lenskart\n"
-        "🆕 Naye offer frames - pichhle 7 din mein offer mein aaye frames\n"
-        "🔄 Abhi check karo - stock aur price turant check\n"
-        "🔔 Alerts - auto alerts on ya off\n"
-        "⚙️ Settings - current settings\n\n"
-        "<b>Track karna</b>\n"
-        "Result ke neeche ⭐ button dabao. Apna frame ya koi bhi match track ho jayega.\n\n"
-        "<b>Stock</b> (har frame ke saath live dikhta hai)\n"
-        "❌ Out of stock - abhi nahi mil raha\n"
-        "🔥 Sirf kuch piece bache - 10 ya kam, jaldi lo\n"
-        "⚠️ Kam stock - 11 se 50 piece\n"
-        "✅ Achha stock - 50 se zyada, araam se le sakte ho\n\n"
+        "<b>Buttons</b>\n"
+        f"{B_FIND} · link bhejne ka tareeka\n"
+        f"{B_FAVS} · track ho rahe frames, live stock ke saath\n"
+        f"{B_BUDGET} · max price\n"
+        f"{B_SCOPE} · offer section ya poora Lenskart\n"
+        f"{B_NEW} · pichhle 7 din ke naye offer frames\n"
+        f"{B_CHECK} · stock aur price abhi check karo\n"
+        f"{B_SETTINGS} · settings aur alerts on/off\n\n"
+        "<b>Stock</b>\n"
+        "✅ 50+ · araam se lo\n"
+        "⚠️ 11-50 · kam bacha hai\n"
+        "🔥 10 ya kam · jaldi lo\n"
+        "❌ Out of stock\n\n"
         f"<b>Auto alerts</b> (roz {times_text()})\n"
         "• Tracked frame stock mein wapas aaye\n"
-        "• Uska price gire ya wo offer mein aa jaye\n"
-        "• Offer mein naya frame aaye jo tumhare tracked frame jaisa ho\n\n"
-        f"📩 <b>Lenskart offers aur help ke liye contact:</b> {SUPPORT_CONTACT}"
-    )
+        "• Price gire ya frame offer mein aa jaye\n"
+        "• Offer mein tumhare frame jaisa naya frame aaye")
 
 
 # ---------------------------------------------------------------- telegram
@@ -645,29 +758,31 @@ B_NEW = "🆕 Naye offer frames"
 B_CHECK = "🔄 Abhi check karo"
 B_ALERTS = "🔔 Alerts"
 B_SETTINGS = "⚙️ Settings"
+B_GUIDE = "📖 Guide"
 B_HELP = "❓ Help"
 
 BUTTON_CMD = {B_FIND: "/find", B_FAVS: "/favs", B_BUDGET: "/budget", B_SCOPE: "/scope",
               B_NEW: "/new", B_CHECK: "/check", B_ALERTS: "/alerts",
-              B_SETTINGS: "/settings", B_HELP: "/help"}
+              B_SETTINGS: "/settings", B_GUIDE: "/guide", B_HELP: "/help"}
 
 MAIN_KB = {
     "keyboard": [[B_FIND, B_FAVS], [B_BUDGET, B_SCOPE], [B_NEW, B_CHECK],
-                 [B_ALERTS, B_SETTINGS], [B_HELP]],
+                 [B_SETTINGS, B_GUIDE], [B_HELP]],
     "resize_keyboard": True,
     "is_persistent": True,
+    "input_field_placeholder": "Lenskart frame ka link paste karo...",
 }
 
 COMMANDS = [
-    ("start", "Bot shuru karo, buttons dikhao"),
+    ("start", "Bot shuru karo"),
     ("favs", "Tracked frames"),
     ("budget", "Max price set karo"),
     ("scope", "Offer section ya poora Lenskart"),
     ("new", "Naye offer frames"),
     ("check", "Abhi stock aur price check karo"),
-    ("alerts", "Auto alerts on/off"),
-    ("settings", "Current settings"),
-    ("help", "Help"),
+    ("settings", "Settings aur alerts"),
+    ("guide", "Bot kaise use karein"),
+    ("help", "Offers aur help ke liye contact"),
 ]
 
 
@@ -684,6 +799,7 @@ def tg(method, **params):
 
 
 def send(chat_id, text, markup=None):
+    """Send (splitting long text). Returns the sent message ids."""
     chunks, cur = [], ""
     for block in text.split("\n\n"):
         if len(cur) + len(block) > 3800 and cur:
@@ -691,15 +807,53 @@ def send(chat_id, text, markup=None):
             cur = ""
         cur += block + "\n\n"
     chunks.append(cur)
+    ids = []
     for i, c in enumerate(chunks):
         params = dict(chat_id=chat_id, text=c.strip() or "-", parse_mode="HTML",
                       disable_web_page_preview="true")
         if markup and i == len(chunks) - 1:
             params["reply_markup"] = json.dumps(markup)
         try:
-            tg("sendMessage", **params)
+            r = tg("sendMessage", **params)
+            ids.append(((r or {}).get("result") or {}).get("message_id"))
         except Exception as ex:
             print("send failed:", ex)
+    return ids
+
+
+def edit(chat_id, msg_id, text, markup=None):
+    """Edit a message in place; falls back to a new message."""
+    if not msg_id:
+        return send(chat_id, text, markup)
+    params = dict(chat_id=chat_id, message_id=msg_id, text=text, parse_mode="HTML",
+                  disable_web_page_preview="true")
+    if markup:
+        params["reply_markup"] = json.dumps(markup)
+    try:
+        tg("editMessageText", **params)
+    except Exception as ex:
+        if "not modified" not in str(getattr(ex, "read", lambda: b"")() or ex):
+            send(chat_id, text, markup)
+
+
+def delete(chat_id, msg_id):
+    if msg_id:
+        try:
+            tg("deleteMessage", chat_id=chat_id, message_id=msg_id)
+        except Exception:
+            pass
+
+
+def answer(cq, text=None, alert=False):
+    try:
+        params = {"callback_query_id": cq["id"]}
+        if text:
+            params["text"] = text[:190]
+        if alert:
+            params["show_alert"] = "true"
+        tg("answerCallbackQuery", **params)
+    except Exception:
+        pass
 
 
 LINK_RE = re.compile(r"https?://(?:www\.)?lenskart\.com/\S+")
@@ -714,11 +868,11 @@ def target_from_text(text):
 
 def add_fav(u, t):
     if not t.get("id"):
-        return "Sirf Lenskart link waale frames track ho sakte hain."
+        return "⚠️ Sirf Lenskart link waale frames track ho sakte hain."
     if any(f["id"] == t["id"] for f in u["favs"]):
-        return f"<b>{e(name_of(t))}</b> pehle se track ho raha hai."
+        return f"⭐ <b>{e(name_of(t))}</b> pehle se track ho raha hai."
     if len(u["favs"]) >= MAX_FAVS:
-        return f"Max {MAX_FAVS} frames track ho sakte hain. Pehle koi hatao."
+        return f"⚠️ Max {MAX_FAVS} frames track ho sakte hain. Pehle koi hatao ({B_FAVS})."
     f = dict(t)
     f["in_stock"] = t.get("qty", 0) > 0
     f["in_offer"] = False
@@ -727,72 +881,118 @@ def add_fav(u, t):
     stock = stock_label(t.get("qty"))
     if not f["in_stock"]:
         stock += ", wapas aate hi bataunga"
-    return (f"⭐ Track ho raha hai: <b>{e(name_of(t))}</b> (₹{t.get('price')})\n{stock}\n"
-            "Stock, price aur iske jaise naye offer frames ka alert milega.")
+    return (f"⭐ <b>Track ho gaya!</b>\n\n<b>{e(name_of(t))}</b>\n{price_html(t)}\n📦 {stock}\n\n"
+            "🔔 Stock, price drop aur iske jaise naye offer frames ka alert milega.")
 
 
 def favs_message(u):
     if not u["favs"]:
-        return ("Abhi koi frame track nahi ho raha.\n"
-                "Link bhejo, phir result ke neeche ⭐ button dabao."), None
-    lines, rows = ["⭐ <b>Tracked frames</b>\n"], []
+        return ("⭐ <b>Tracked frames</b>\n\nAbhi koi frame track nahi ho raha.\n"
+                "Frame ka link bhejo, phir result ke neeche ⭐ dabao."), None
+    refresh = [dict(id=f["id"]) for f in u["favs"]]
+    refresh_live(refresh)
+    live = {r["id"]: r for r in refresh}
+    lines, rows = [f"⭐ <b>Tracked frames</b> ({len(u['favs'])}/{MAX_FAVS})"], []
     for i, f in enumerate(u["favs"], 1):
-        try:
-            p = product(f["id"])
-            f.update(price=p["price"], qty=p["qty"], in_stock=p["qty"] > 0)
-        except Exception:
-            pass
-        lines.append(f"<b>{i}. {e(name_of(f))}</b> - ₹{f.get('price')}\n"
-                     f"{stock_label(f.get('qty'))}\n"
-                     f"{dims(f)}, {e(f.get('colour'))} {e(f.get('shape'))}\n{e(f['url'])}\n")
-        rows.append([(f"🔎 {i} jaise dhoondo", f"sim:{f['id']}"), (f"❌ {i} hatao", f"unfav:{f['id']}")])
+        r = live.get(f["id"]) or {}
+        if r.get("qty") is not None:
+            f.update(qty=r["qty"], in_stock=r["qty"] > 0)
+        if r.get("price"):
+            f["price"] = r["price"]
+        lines.append(f"{num_emoji(i)} <b>{e(name_of(f))}</b>\n"
+                     f"{price_html(f)} · {stock_label(f.get('qty'))}\n"
+                     f"📐 {dims(f)} · 🎨 {e(f.get('colour'))} {e(f.get('shape'))}\n"
+                     f"{link_html(f)}")
+        rows.append([{"text": f"🔎 {i} jaise", "callback_data": f"sim:{f['id']}"},
+                     {"text": f"🛒 {i} kholo", "url": f["url"]},
+                     {"text": f"❌ {i} hatao", "callback_data": f"unfav:{f['id']}"}])
     save_state()
-    return "\n".join(lines), inline(rows)
+    return "\n\n".join(lines), {"inline_keyboard": rows}
 
 
 def new_message(u):
     cutoff = time.time() - 7 * 86400
     with LOCK:
         items = [n for n in STATE["recent_new"] if n["ts"] >= cutoff]
-    items = [n for n in items if (n.get("price") or 0) <= u["budget"]][-12:][::-1]
+    items = [n for n in items if (n.get("price") or 0) <= u["budget"]][-10:][::-1]
     if not items:
-        return ("Pichhle 7 din mein tumhare budget mein koi naya offer frame nahi aaya.\n"
-                "(Bot jab se chal raha hai tab se hi naye frames ginta hai.)"), None
+        return ("🆕 <b>Naye offer frames</b>\n\n"
+                f"Pichhle 7 din mein ₹{u['budget']} tak koi naya offer frame nahi aaya.\n"
+                f"<i>Roz {times_text()} check hota hai.</i>"), None
     items = [dict(n) for n in items]
     refresh_live(items)
-    lines, rows, row = [f"🆕 <b>Naye offer frames</b> (₹{u['budget']} tak)\n"], [], []
+    lines = [f"🆕 <b>Naye offer frames</b> · ₹{u['budget']} tak · pichhle 7 din"]
     for i, n in enumerate(items, 1):
-        lines.append(f"<b>{i}. {e(name_of(n))}</b> - ₹{n.get('price')}\n"
-                     f"{stock_label(n.get('qty'))}\n"
-                     f"{dims(n)}, width {fmt_num(n.get('width'), 'mm')}, "
-                     f"{e(n.get('colour'))} {e(n.get('shape'))}\n{e(n['url'])}\n")
-        row.append((f"⭐ {i}", f"fav:{n['id']}"))
-        if len(row) == 4:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    lines.append("Track karne ke liye neeche ⭐ number dabao.")
-    return "\n".join(lines), inline(rows)
+        lines.append(f"{num_emoji(i)} <b>{e(name_of(n))}</b>\n"
+                     f"{price_html(n)} · {stock_label(n.get('qty'))}\n"
+                     f"📐 {dims(n)} · {fmt_num(n.get('width'), 'mm')} · "
+                     f"🎨 {e(n.get('colour'))} {e(n.get('shape'))}\n{link_html(n)}")
+    lines.append("👇 Track karne ke liye ⭐ number dabao")
+    btns = [(f"⭐ {i}", f"fav:{n['id']}") for i, n in enumerate(items, 1)]
+    return "\n\n".join(lines), inline([btns[k:k + 5] for k in range(0, len(btns), 5)])
+
+
+def settings_view(u):
+    text = ("⚙️ <b>Settings</b>\n\n"
+            f"💰 Budget: <b>₹{u['budget']} tak</b>\n"
+            f"🌐 Kahan dhoondu: <b>{scope_name(u['scope'])}</b>\n"
+            f"🔔 Auto alerts: <b>{'ON' if u['alerts'] else 'OFF'}</b>\n"
+            f"⭐ Tracked: <b>{len(u['favs'])}/{MAX_FAVS}</b>\n"
+            f"⏰ Auto check: roz {times_text()} (IST)")
+    return text, inline([[("💰 Budget badlo", "menu:budget"), ("🌐 Jagah badlo", "menu:scope")],
+                         [("🔕 Alerts OFF karo" if u["alerts"] else "🔔 Alerts ON karo",
+                           "alerts:" + ("off" if u["alerts"] else "on"))]])
+
+
+def budget_view(u):
+    opts = [500, 800, 1000, 1200, 1500, 2000, 3000, 5000]
+    btns = [((f"✅ ₹{o}" if o == u["budget"] else f"₹{o}"), f"budget:{o}") for o in opts]
+    return (f"💰 <b>Budget</b>\n\nAbhi: <b>₹{u['budget']} tak</b>\n"
+            "Naya chuno, ya likho jaise <code>/budget 900</code>",
+            inline([btns[:4], btns[4:]]))
+
+
+def scope_view(u):
+    def mark(s, t):
+        return ("✅ " if u["scope"] == s else "") + t
+    return (f"🌐 <b>Kahan dhoondu?</b>\n\nAbhi: <b>{scope_name(u['scope'])}</b>\n\n"
+            "🏷 <b>Offer section</b> · sirf sale waale frames, sabse saste\n"
+            "🌐 <b>Poora Lenskart</b> · zyada options, close match ke chances zyada",
+            inline([[(mark("offer", "🏷 Offer section"), "scope:offer"),
+                     (mark("all", "🌐 Poora Lenskart"), "scope:all")]]))
 
 
 def settings_text(u):
-    return (f"⚙️ <b>Settings</b>\nBudget: ₹{u['budget']}\nKahan: {scope_name(u['scope'])}\n"
-            f"Alerts: {'ON' if u['alerts'] else 'OFF'}\nTracked frames: {len(u['favs'])}")
+    return settings_view(u)[0]
 
 
-def do_match(chat_id, u, t):
-    send(chat_id, "Dhoond raha hoon, thoda time lagega...")
+def do_match(chat_id, u, t, scope=None):
+    scope = scope or u["scope"]
+    try:
+        tg("sendChatAction", chat_id=chat_id, action="typing")
+    except Exception:
+        pass
+    wait = send(chat_id, "🔍 <b>Dhoond raha hoon...</b>\n"
+                         f"<i>{scope_name(scope)} ke frames check ho rahe hain, 10-20 second lagenge</i>")
     u["last"] = t
     save_state()
-    text, ranked = match_text(t, u["budget"], u["scope"])
+    try:
+        text, ranked = match_text(t, u["budget"], scope)
+    finally:
+        for mid in wait:
+            delete(chat_id, mid)
     rows = []
-    if t.get("id"):
-        rows.append([("⭐ Mera frame track karo", f"fav:{t['id']}")])
     if ranked:
-        rows.append([(f"⭐ {i}", f"fav:{c['id']}") for i, (_, c) in enumerate(ranked, 1)])
-        text += "\nTrack karne ke liye neeche ⭐ number dabao."
-    send(chat_id, text, inline(rows) if rows else None)
+        rows.append([{"text": f"⭐ {i}", "callback_data": f"fav:{c['id']}"}
+                     for i, (_, c) in enumerate(ranked, 1)])
+        rows.append([{"text": f"🛒 {i}", "url": c["url"]} for i, (_, c) in enumerate(ranked, 1)])
+    if t.get("id"):
+        rows.append([{"text": "⭐ Mera frame track karo", "callback_data": f"fav:{t['id']}"}])
+        if scope == "offer":
+            rows.append([{"text": "🌐 Poore Lenskart mein dhoondo", "callback_data": f"simall:{t['id']}"}])
+    if ranked:
+        text += f"\n\n{DIV}\n👇 <b>⭐ number</b> = track karo · <b>🛒 number</b> = Lenskart pe kholo"
+    send(chat_id, text, {"inline_keyboard": rows} if rows else None)
 
 
 def handle(chat_id, text):
@@ -806,40 +1006,36 @@ def handle(chat_id, text):
 
     if cmd == "/start":
         save_state()
-        return send(chat_id, help_text(), MAIN_KB)
+        return send(chat_id, welcome_text(u), MAIN_KB)
     if cmd == "/help":
         return send(chat_id, support_text(), support_markup())
+    if cmd == "/guide":
+        return send(chat_id, guide_text(), MAIN_KB)
     if cmd == "/find":
-        return send(chat_id, "Frame ka Lenskart link yahan paste karo.\n\n"
-                             "Ya specs likho, jaise:\n<code>50-20-145 136mm black square acetate</code>\n\n"
-                             f"Abhi: ₹{u['budget']} tak, {scope_name(u['scope'])} mein.")
+        return send(chat_id, "🔎 <b>Frame dhoondo</b>\n\n"
+                             "Lenskart app ya website se frame ka <b>link copy karke</b> yahan paste karo.\n\n"
+                             "Ya specs likho:\n<code>50-20-145 136mm black square acetate</code>\n\n"
+                             f"⚙️ Abhi: ₹{u['budget']} tak · {scope_name(u['scope'])}")
     if cmd == "/budget":
         n = num(arg)
         if n and n >= 100:
             u["budget"] = int(n)
             save_state()
-            return send(chat_id, f"Budget ab ₹{u['budget']} hai.")
-        opts = [500, 800, 1200, 1500, 2000, 3000]
-        return send(chat_id, f"Abhi budget ₹{u['budget']} hai. Naya chuno, ya likho: /budget 900",
-                    inline([[(f"₹{o}", f"budget:{o}") for o in opts[:3]],
-                            [(f"₹{o}", f"budget:{o}") for o in opts[3:]]]))
+            return send(chat_id, f"✅ Budget ab <b>₹{u['budget']} tak</b> hai.")
+        return send(chat_id, *budget_view(u))
     if cmd == "/scope":
         if arg.lower() in ("offer", "all"):
             u["scope"] = arg.lower()
             save_state()
-            return send(chat_id, f"Ab {scope_name(u['scope'])} mein dhoondunga.")
-        return send(chat_id, f"Abhi: {scope_name(u['scope'])}. Kahan dhoondu?",
-                    inline([[("🏷 Sirf offer section", "scope:offer"),
-                             ("🌐 Poora Lenskart", "scope:all")]]))
+            return send(chat_id, f"✅ Ab <b>{scope_name(u['scope'])}</b> mein dhoondunga.")
+        return send(chat_id, *scope_view(u))
     if cmd == "/alerts":
         if arg.lower() in ("on", "off"):
             u["alerts"] = arg.lower() == "on"
             save_state()
-            return send(chat_id, "Auto alerts: " + ("ON" if u["alerts"] else "OFF"))
-        return send(chat_id, "Auto alerts abhi " + ("ON" if u["alerts"] else "OFF") + " hain.",
-                    inline([[("🔔 ON", "alerts:on"), ("🔕 OFF", "alerts:off")]]))
+        return send(chat_id, *settings_view(u))
     if cmd == "/settings":
-        return send(chat_id, settings_text(u))
+        return send(chat_id, *settings_view(u))
     if cmd == "/favs":
         return send(chat_id, *favs_message(u))
     if cmd == "/new":
@@ -847,64 +1043,86 @@ def handle(chat_id, text):
     if cmd == "/unfav":
         n = num(arg)
         if not n or not (1 <= int(n) <= len(u["favs"])):
-            return send(chat_id, "Number batao, jaise /unfav 1")
+            return send(chat_id, "Number batao, jaise <code>/unfav 1</code>")
         f = u["favs"].pop(int(n) - 1)
         save_state()
-        return send(chat_id, f"Hata diya: {e(name_of(f))}")
+        return send(chat_id, f"🗑 Hata diya: <b>{e(name_of(f))}</b>")
     if cmd == "/fav":
         t = target_from_text(arg) if arg else u.get("last")
         if not t:
             return send(chat_id, "Pehle frame ka link bhejo, phir ⭐ button dabao.")
         return send(chat_id, add_fav(u, t))
     if cmd == "/check":
-        send(chat_id, "Check kar raha hoon...")
-        if not run_watch(only_chat=str(chat_id)):
-            send(chat_id, "Abhi koi nayi update nahi hai.")
+        wait = send(chat_id, "🔄 <b>Check kar raha hoon...</b>")
+        n = run_watch(only_chat=str(chat_id))
+        for mid in wait:
+            delete(chat_id, mid)
+        if not n:
+            send(chat_id, "✅ Sab same hai, abhi koi nayi update nahi.\n"
+                          f"<i>Agla auto check: {next_check().strftime('%I:%M %p').lstrip('0')} IST</i>")
         return
     if cmd.startswith("/"):
-        return send(chat_id, "Ye command samajh nahi aaya. Neeche ke buttons use karo.", MAIN_KB)
+        return send(chat_id, "🤔 Ye command samajh nahi aaya. Neeche ke buttons use karo.", MAIN_KB)
 
-    t = target_from_text(text)
+    try:
+        t = target_from_text(text)
+    except Exception:
+        return send(chat_id, "😕 <b>Is link se frame nahi mila</b>\n\n"
+                             "Lenskart ke <b>product page</b> ka link bhejo (jisme ek frame dikhta ho).")
     if not t:
-        return send(chat_id, "Lenskart ka product link bhejo, ya specs aise likho:\n"
+        return send(chat_id, "🤔 <b>Ye samajh nahi aaya</b>\n\n"
+                             "Lenskart frame ka <b>link</b> bhejo, ya specs aise likho:\n"
                              "<code>50-20-145 136mm black square</code>", MAIN_KB)
     do_match(chat_id, u, t)
 
 
 def on_callback(cq):
     chat_id = ((cq.get("message") or {}).get("chat") or {}).get("id")
+    msg_id = (cq.get("message") or {}).get("message_id")
     data = cq.get("data") or ""
-    try:
-        tg("answerCallbackQuery", callback_query_id=cq["id"])
-    except Exception:
-        pass
     if not chat_id:
-        return
+        return answer(cq)
     u = user(chat_id)
     kind, _, val = data.partition(":")
     if kind == "fav":
+        answer(cq, "⭐ Track ho raha hai")
         return send(chat_id, add_fav(u, product(val)))
     if kind == "unfav":
         for f in list(u["favs"]):
             if f["id"] == val:
                 u["favs"].remove(f)
                 save_state()
-                return send(chat_id, f"Hata diya: {e(name_of(f))}")
-        return send(chat_id, "Ye pehle hi hat chuka hai.")
+                answer(cq, "Hata diya")
+                return edit(chat_id, msg_id, *favs_message(u))
+        return answer(cq, "Ye pehle hi hat chuka hai")
     if kind == "sim":
+        answer(cq)
         return do_match(chat_id, u, product(val))
+    if kind == "simall":
+        answer(cq)
+        return do_match(chat_id, u, product(val), scope="all")
+    if kind == "menu" and val == "budget":
+        answer(cq)
+        return edit(chat_id, msg_id, *budget_view(u))
+    if kind == "menu" and val == "scope":
+        answer(cq)
+        return edit(chat_id, msg_id, *scope_view(u))
     if kind == "budget" and num(val):
         u["budget"] = int(num(val))
         save_state()
-        return send(chat_id, f"Budget ab ₹{u['budget']} hai.")
+        answer(cq, f"Budget ₹{u['budget']}")
+        return edit(chat_id, msg_id, *settings_view(u))
     if kind == "scope" and val in ("offer", "all"):
         u["scope"] = val
         save_state()
-        return send(chat_id, f"Ab {scope_name(val)} mein dhoondunga.")
+        answer(cq, scope_name(val))
+        return edit(chat_id, msg_id, *settings_view(u))
     if kind == "alerts" and val in ("on", "off"):
         u["alerts"] = val == "on"
         save_state()
-        return send(chat_id, "Auto alerts: " + ("ON" if u["alerts"] else "OFF"))
+        answer(cq, "Alerts " + val.upper())
+        return edit(chat_id, msg_id, *settings_view(u))
+    answer(cq)
 
 
 # ---------------------------------------------------------------- watcher
@@ -932,6 +1150,17 @@ def run_watch(only_chat=None):
     for chat_id, u in users.items():
         if not u.get("alerts", True) and only_chat is None:
             continue
+        if REQUIRED_CHANNELS and only_chat is None and u.get("favs"):
+            try:
+                missing = missing_channels(int(chat_id))
+            except ValueError:
+                missing = []
+            if missing:          # left a channel: no alerts, one reminder per day
+                today = now_ist().date().isoformat()
+                if u.get("lock_notice") != today:
+                    u["lock_notice"] = today
+                    send(chat_id, *join_view(u.get("name"), missing))
+                continue
         msgs = []
         for f in u.get("favs", []):
             try:
@@ -939,18 +1168,20 @@ def run_watch(only_chat=None):
             except Exception:
                 continue
             name = f"<b>{e(name_of(f))}</b>"
+            buy = {"inline_keyboard": [[{"text": "🛒 Lenskart pe kholo", "url": f["url"]}]]}
             now_stock = p["qty"] > 0
             if now_stock and not f.get("in_stock", True):
-                msgs.append((f"🟢 Stock mein wapas aa gaya: {name} - ₹{p['price']}\n"
-                             f"{stock_label(p['qty'])}\n{e(f['url'])}", None))
+                msgs.append((f"🟢 <b>Stock mein wapas aa gaya!</b>\n\n{name}\n{price_html(p)}\n"
+                             f"📦 {stock_label(p['qty'])}", buy))
             elif not now_stock and f.get("in_stock", True):
-                msgs.append((f"🔴 Out of stock ho gaya: {name}. Wapas aate hi bataunga.", None))
+                msgs.append((f"🔴 <b>Out of stock ho gaya</b>\n\n{name}\nWapas aate hi bataunga.", None))
             if p["price"] and f.get("price") and p["price"] < f["price"]:
-                msgs.append((f"💰 Price gir gaya: {name} ₹{f['price']} → ₹{p['price']}\n{e(f['url'])}", None))
+                msgs.append((f"💰 <b>Price gir gaya!</b>\n\n{name}\n"
+                             f"<s>₹{f['price']}</s> → <b>₹{p['price']}</b>\n📦 {stock_label(p['qty'])}", buy))
             now_offer = f["id"] in offer_ids
             if now_offer and not f.get("in_offer"):
-                msgs.append((f"🏷 Tumhara tracked frame ab offer section mein hai: {name} - "
-                             f"₹{offer_by_id[f['id']]['price']}\n{e(f['url'])}", None))
+                msgs.append((f"🏷 <b>Tumhara frame ab offer mein hai!</b>\n\n{name}\n"
+                             f"💰 <b>₹{offer_by_id[f['id']]['price']}</b>\n📦 {stock_label(p['qty'])}", buy))
             f.update(in_stock=now_stock, price=p["price"] or f.get("price"), in_offer=now_offer)
 
             for c in new_items:
@@ -959,12 +1190,12 @@ def run_watch(only_chat=None):
                 s = score(f, c)
                 if s is not None and s <= ALERT_SCORE:
                     msgs.append((
-                        f"🆕 Offer mein naya frame aaya jo {name} jaisa hai:\n"
-                        f"<b>{e(name_of(c))}</b> - ₹{c['price']} ({label(s)})\n"
-                        f"{stock_label(c.get('qty'))}\n"
-                        f"{dims(c)}, width {fmt_num(c['width'], 'mm')}, {e(c['colour'])} {e(c['shape'])}\n"
-                        f"Farak: {e(diff_line(f, c))}\n{e(c['url'])}",
-                        inline([[("⭐ Ise track karo", f"fav:{c['id']}")]])))
+                        f"🆕 <b>Naya offer frame, tumhare {e(name_of(f))} jaisa!</b>\n\n"
+                        f"<b>{e(name_of(c))}</b>\n{label(s)}\n{price_html(c)}\n"
+                        f"{specs_line(c)}\n{look_line(c)}\n📦 {stock_label(c.get('qty'))}\n"
+                        f"↔️ <i>Farak: {e(diff_line(f, c))}</i>",
+                        {"inline_keyboard": [[{"text": "⭐ Track karo", "callback_data": f"fav:{c['id']}"},
+                                              {"text": "🛒 Kholo", "url": c["url"]}]]}))
         for m, markup in msgs:
             send(chat_id, m, markup)
             sent += 1
@@ -1042,11 +1273,17 @@ def main():
     except Exception as ex:
         print("setMyCommands failed:", ex)
     print(f"Bot chal raha hai: @{me['username']}  (band karne ke liye Ctrl+C)")
+    if REQUIRED_CHANNELS:
+        resolve_channels()
+        print("Join zaroori:", ", ".join(f"{channel_title(c)} ({c['id']})" for c in REQUIRED_CHANNELS),
+              flush=True)
     threading.Thread(target=watcher_loop, daemon=True).start()
     offset = 0
+    allowed = json.dumps(["message", "callback_query", "chat_member"])
     while True:
         try:
-            ups = tg("getUpdates", offset=offset, timeout=50).get("result", [])
+            ups = tg("getUpdates", offset=offset, timeout=50,
+                     allowed_updates=allowed).get("result", [])
         except Exception as ex:
             if "409" in str(ex):
                 print("poll error: ye bot kahin aur bhi chal raha hai (PC ya dusra server). "
@@ -1057,6 +1294,16 @@ def main():
             continue
         for up in ups:
             offset = up["update_id"] + 1
+            if up.get("chat_member"):
+                cm = up["chat_member"]
+
+                def member_work(cm=cm):
+                    try:
+                        on_chat_member(cm)
+                    except Exception as ex:
+                        print("chat_member error:", repr(ex))
+                threading.Thread(target=member_work, daemon=True).start()
+                continue
             cq = up.get("callback_query")
             msg = up.get("message") or {}
             text, chat = msg.get("text"), (msg.get("chat") or {}).get("id")
@@ -1064,11 +1311,19 @@ def main():
                 chat = ((cq.get("message") or {}).get("chat") or {}).get("id")
             elif not text or not chat:
                 continue
+            if (((cq or {}).get("message") or msg).get("chat") or {}).get("type") not in (None, "private"):
+                continue         # only private chats with the bot
 
-            uid = ((cq or msg).get("from") or {}).get("id")
+            frm = (cq or msg).get("from") or {}
+            uid = frm.get("id")
 
-            def work(chat=chat, text=text, cq=cq, uid=uid):
+            def work(chat=chat, text=text, cq=cq, uid=uid, first=frm.get("first_name")):
                 try:
+                    if first:
+                        u = user(chat)
+                        if u.get("name") != first:
+                            u["name"] = first
+                            save_state()
                     if not gate(chat, uid, text, cq):
                         return
                     if cq:
