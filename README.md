@@ -94,6 +94,7 @@ scp -i <your-key>.pem FrameMatcher_Bot/bot.py <user>@<vps-ip>:~/FrameMatcher_Bot
 |---|---|---|
 | `BOT_TOKEN` | Token from BotFather | required |
 | `CHECK_TIMES` | Daily auto-check times, 24-hour **India time (IST)**, comma separated. The server's own timezone doesn't matter. | `00:00,13:00` |
+| `REQUIRED_CHANNELS` | Channels users must join before using the bot. Public: `@username`; private: `-100id\|https://t.me/+invite`. Comma separated. The bot must be an admin in each channel. Empty = open to everyone. | empty |
 | `DEFAULT_BUDGET` | Starting max price for new users (₹) | `1200` |
 
 ## Keypad buttons

@@ -38,7 +38,7 @@ def load_env():
                     continue
                 k, v = line.split("=", 1)
                 env[k.strip()] = v.strip().strip('"').strip("'")
-    for k in ("BOT_TOKEN", "CHECK_TIMES", "DEFAULT_BUDGET", "ALERT_SCORE"):
+    for k in ("BOT_TOKEN", "CHECK_TIMES", "DEFAULT_BUDGET", "ALERT_SCORE", "REQUIRED_CHANNELS"):
         if os.environ.get(k):
             env[k] = os.environ[k]
     return env
@@ -485,6 +485,109 @@ SUPPORT_USERNAME = SUPPORT_CONTACT.lstrip("@")
 SUPPORT_PREFILL = "Hey, I need offer details for Lenskart"
 SUPPORT_URL = (f"https://t.me/{SUPPORT_USERNAME}?text="
                + urllib.parse.quote(SUPPORT_PREFILL))
+
+
+# ---------------------------------------------------------------- channel join gate
+def parse_channels(s):
+    """REQUIRED_CHANNELS=@public1,@public2,-1001234567890|https://t.me/+invite
+    Public channels: @username. Private channels: numeric id|invite link."""
+    out = []
+    for part in (s or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        cid, _, link = part.partition("|")
+        cid, link = cid.strip(), link.strip()
+        if cid.startswith("@") and not link:
+            link = f"https://t.me/{cid[1:]}"
+        if cid and link:
+            out.append({"id": cid, "link": link})
+    return out
+
+
+REQUIRED_CHANNELS = parse_channels(ENV.get("REQUIRED_CHANNELS"))
+JOIN_OK_SECONDS = 600            # re-check a member at most every 10 min
+JOINED_CACHE = {}                # user_id -> time last confirmed as member
+CHANNEL_TITLES = {}
+
+
+def channel_title(ch):
+    if ch["id"] not in CHANNEL_TITLES:
+        try:
+            CHANNEL_TITLES[ch["id"]] = tg("getChat", chat_id=ch["id"])["result"].get("title")
+        except Exception:
+            CHANNEL_TITLES[ch["id"]] = None
+    return CHANNEL_TITLES[ch["id"]] or ch["id"]
+
+
+def missing_channels(user_id, fresh=False):
+    """Channels this user has not joined. If the bot can't check a channel
+    (not admin there, wrong id) that channel is skipped, so users never get stuck."""
+    if not REQUIRED_CHANNELS or not user_id:
+        return []
+    if not fresh and time.time() - JOINED_CACHE.get(user_id, 0) < JOIN_OK_SECONDS:
+        return []
+    missing = []
+    for ch in REQUIRED_CHANNELS:
+        try:
+            st = tg("getChatMember", chat_id=ch["id"], user_id=user_id)["result"]
+            ok = st.get("status") in ("creator", "administrator", "member") or (
+                st.get("status") == "restricted" and st.get("is_member"))
+        except Exception as ex:
+            print(f"join check failed for {ch['id']} (bot ko channel mein admin banao):", ex, flush=True)
+            ok = True
+        if not ok:
+            missing.append(ch)
+    if not missing:
+        JOINED_CACHE[user_id] = time.time()
+    return missing
+
+
+def join_prompt(chat_id, missing):
+    rows = [[{"text": f"📢 Join karo: {channel_title(ch)}", "url": ch["link"]}] for ch in missing]
+    rows.append([{"text": "✅ Join kar liya", "callback_data": "joined"}])
+    send(chat_id, "🔒 <b>Bot use karne ke liye pehle hamare channel join karo</b>\n\n"
+                  "Neeche ke channel join karo, phir <b>✅ Join kar liya</b> dabao.",
+         {"inline_keyboard": rows})
+
+
+def gate(chat, uid, text, cq):
+    """True when the update may go to the normal handlers."""
+    if not REQUIRED_CHANNELS:
+        return True
+    if cq:
+        if (cq.get("data") or "") == "joined":
+            missing = missing_channels(uid, fresh=True)
+            if missing:
+                try:
+                    tg("answerCallbackQuery", callback_query_id=cq["id"], show_alert="true",
+                       text="Abhi saare channel join nahi hue. Join karke dobara dabao.")
+                except Exception:
+                    pass
+                return False
+            try:
+                tg("answerCallbackQuery", callback_query_id=cq["id"], text="Shukriya! 🎉")
+            except Exception:
+                pass
+            send(chat, "✅ Shukriya! Ab bot use kar sakte ho.\n\n" + help_text(), MAIN_KB)
+            return False
+        missing = missing_channels(uid)
+        if missing:
+            try:
+                tg("answerCallbackQuery", callback_query_id=cq["id"])
+            except Exception:
+                pass
+            join_prompt(chat, missing)
+            return False
+        return True
+    first = (text or "").strip().split(" ")[0].lower().split("@")[0]
+    if first == "/help" or (text or "").strip() == B_HELP:
+        return True              # contact button always works
+    missing = missing_channels(uid)
+    if missing:
+        join_prompt(chat, missing)
+        return False
+    return True
 
 
 def support_text():
@@ -962,8 +1065,12 @@ def main():
             elif not text or not chat:
                 continue
 
-            def work(chat=chat, text=text, cq=cq):
+            uid = ((cq or msg).get("from") or {}).get("id")
+
+            def work(chat=chat, text=text, cq=cq, uid=uid):
                 try:
+                    if not gate(chat, uid, text, cq):
+                        return
                     if cq:
                         on_callback(cq)
                     else:
